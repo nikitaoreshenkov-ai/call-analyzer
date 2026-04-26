@@ -6,131 +6,136 @@ import whisper
 
 load_dotenv()
 
-claude = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
-
 from stages import SALES_STAGES
 
 WHISPER_MODEL_SIZE = "small"
+CLAUDE_MODEL = "claude-opus-4-6"
+MAX_TRANSCRIPT_CHARS = 12000
 
-print(f"Загружаю модель Whisper ({WHISPER_MODEL_SIZE})...")
-whisper_model = whisper.load_model(WHISPER_MODEL_SIZE)
-print(f"Модель загружена!\n")
+_whisper_model = None
 
 
-def transcribe_audio(audio_file_path: str) -> str:
+def get_whisper_model():
+    global _whisper_model
+    if _whisper_model is None:
+        print(f"Загружаю модель Whisper ({WHISPER_MODEL_SIZE})...")
+        _whisper_model = whisper.load_model(WHISPER_MODEL_SIZE)
+        print("Модель загружена!")
+    return _whisper_model
+
+
+def transcribe_audio(audio_file_path: str, model=None) -> str:
     print(f"Транскрибирую аудио: {audio_file_path}")
-    print("   Это может занять несколько минут...")
-
-    result = whisper_model.transcribe(
-        audio_file_path,
-        language="ru",
-        verbose=False
-    )
-
+    if model is None:
+        model = get_whisper_model()
+    result = model.transcribe(audio_file_path, language="ru", verbose=False)
     text = result["text"].strip()
     print(f"Транскрипция готова! Длина текста: {len(text)} символов")
     return text
 
 
-def analyze_call(transcript: str, manager_name: str = "Менеджер") -> dict:
-    print(f"\nАнализирую звонок с помощью Claude...")
-
-    # Обрезаем транскрипт если он слишком длинный (оставляем ~12000 символов)
-    if len(transcript) > 12000:
-        transcript = transcript[:12000] + "\n...[транскрипт обрезан для анализа]"
-
+def _build_stages_text() -> str:
     stages_text = ""
     for i, stage in enumerate(SALES_STAGES, 1):
         stages_text += f"\n{i}. {stage['name']}:\n"
         for criterion in stage["criteria"]:
             stages_text += f"   - {criterion}\n"
+    return stages_text
 
-    prompt = f"""Ты эксперт по продажам недвижимости и тренер менеджеров по продажам.
 
-Проанализируй транскрипт звонка менеджера по имени {manager_name}.
+def analyze_call(transcript: str, manager_name: str = "Менеджер") -> tuple[dict, bool]:
+    """Возвращает (анализ, был_ли_обрезан_транскрипт)."""
+    print("\nАнализирую звонок с помощью Claude...")
 
-ЭТАПЫ ПРОДАЖИ, которые нужно оценить:
-{stages_text}
+    was_truncated = len(transcript) > MAX_TRANSCRIPT_CHARS
+    if was_truncated:
+        transcript = transcript[:MAX_TRANSCRIPT_CHARS] + "\n...[транскрипт обрезан]"
 
-ТРАНСКРИПТ ЗВОНКА:
-{transcript}
+    claude = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+    stages_text = _build_stages_text()
 
-Верни анализ в формате JSON со следующей структурой:
-{{
-  "manager_name": "{manager_name}",
-  "overall_score": число от 0 до 100,
-  "call_summary": "краткое описание звонка в 2-3 предложениях",
-  "stages": [
-    {{
-      "stage_name": "название этапа",
-      "completed": true/false,
-      "score": число от 0 до 10,
-      "what_was_done": "что менеджер сделал правильно",
-      "what_was_missed": "что не сделал или сделал плохо",
-      "quote": "цитата из звонка как пример (если есть)",
-      "recommendation": "конкретный совет как улучшить"
-    }}
-  ],
-  "critical_misses": ["список критичных пропусков"],
-  "top_strengths": ["список сильных сторон"],
-  "priority_improvements": ["топ-3 вещи которые нужно улучшить в первую очередь"]
-}}
-
-Отвечай строго в JSON формате, без дополнительного текста.
-Все поля должны быть на русском языке.
-Будь конкретным: не пиши общие фразы, приводи примеры из разговора.
-"""
-
-    response = claude.messages.create(
-        model="claude-opus-4-6",
-        max_tokens=8000,
-        messages=[{"role": "user", "content": prompt}]
+    system_prompt = (
+        "Ты эксперт по продажам недвижимости и тренер менеджеров по продажам.\n\n"
+        "ЭТАПЫ ПРОДАЖИ, которые нужно оценить:\n"
+        + stages_text
     )
 
-    response_text = response.content[0].text
+    user_prompt = (
+        f"Проанализируй транскрипт звонка менеджера по имени {manager_name}.\n\n"
+        "ТРАНСКРИПТ ЗВОНКА:\n"
+        + transcript
+        + "\n\nВерни анализ строго в формате JSON:\n"
+        "{\n"
+        f'  "manager_name": "{manager_name}",\n'
+        '  "overall_score": число от 0 до 100,\n'
+        '  "call_summary": "краткое описание звонка в 2-3 предложениях",\n'
+        '  "stages": [\n'
+        '    {\n'
+        '      "stage_name": "название этапа",\n'
+        '      "completed": true или false,\n'
+        '      "score": число от 0 до 10,\n'
+        '      "what_was_done": "что менеджер сделал правильно",\n'
+        '      "what_was_missed": "что не сделал или сделал плохо",\n'
+        '      "quote": "цитата из звонка как пример",\n'
+        '      "recommendation": "конкретный совет как улучшить"\n'
+        '    }\n'
+        '  ],\n'
+        '  "critical_misses": ["список критичных пропусков"],\n'
+        '  "top_strengths": ["список сильных сторон"],\n'
+        '  "priority_improvements": ["топ-3 приоритета для улучшения"]\n'
+        '}\n\n'
+        "Отвечай строго в JSON формате, без дополнительного текста. "
+        "Все поля на русском языке. "
+        "Будь конкретным — приводи примеры из разговора."
+    )
 
-    if "```json" in response_text:
-        response_text = response_text.split("```json")[1].split("```")[0]
-    elif "```" in response_text:
-        response_text = response_text.split("```")[1].split("```")[0]
+    response = claude.messages.create(
+        model=CLAUDE_MODEL,
+        max_tokens=8000,
+        temperature=0,
+        system=[{
+            "type": "text",
+            "text": system_prompt,
+            "cache_control": {"type": "ephemeral"}
+        }],
+        messages=[{"role": "user", "content": user_prompt}]
+    )
+
+    text = response.content[0].text
+    if "```json" in text:
+        text = text.split("```json")[1].split("```")[0]
+    elif "```" in text:
+        text = text.split("```")[1].split("```")[0]
 
     try:
-        analysis = json.loads(response_text.strip())
-    except json.JSONDecodeError:
-        # Если JSON обрезан — пробуем починить добавив закрывающие скобки
-        response_text = response_text.strip()
-        if not response_text.endswith("}"):
-            response_text += ']}}'
-        analysis = json.loads(response_text)
+        analysis = json.loads(text.strip())
+    except json.JSONDecodeError as e:
+        raise ValueError(
+            f"Claude вернул некорректный JSON: {e}\n\nНачало ответа:\n{text[:300]}"
+        )
 
     print("Анализ получен!")
-    return analysis
+    return analysis, was_truncated
 
 
 def print_report(analysis: dict):
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print(f"АНАЛИЗ ЗВОНКА: {analysis['manager_name']}")
-    print("="*60)
+    print("=" * 60)
 
     score = analysis["overall_score"]
-    if score >= 80:
-        level = "ХОРОШО"
-    elif score >= 60:
-        level = "СРЕДНЕ"
-    else:
-        level = "НУЖНА РАБОТА"
+    level = "ХОРОШО" if score >= 80 else "СРЕДНЕ" if score >= 60 else "НУЖНА РАБОТА"
 
     print(f"\nОБЩАЯ ОЦЕНКА: {score}/100 [{level}]")
     print(f"\nРезюме:\n   {analysis['call_summary']}")
 
-    print("\n" + "-"*60)
+    print("\n" + "-" * 60)
     print("ОЦЕНКА ПО ЭТАПАМ:")
-    print("-"*60)
+    print("-" * 60)
 
     for stage in analysis["stages"]:
         status = "[+]" if stage["completed"] else "[-]"
         print(f"\n{status} {stage['stage_name']} — {stage['score']}/10")
-
         if stage.get("what_was_done"):
             print(f"   Хорошо: {stage['what_was_done']}")
         if stage.get("what_was_missed"):
@@ -140,7 +145,7 @@ def print_report(analysis: dict):
         if stage.get("recommendation"):
             print(f"   Совет: {stage['recommendation']}")
 
-    print("\n" + "-"*60)
+    print("\n" + "-" * 60)
     print("КРИТИЧНЫЕ ПРОПУСКИ:")
     for miss in analysis.get("critical_misses", []):
         print(f"   * {miss}")
@@ -153,7 +158,7 @@ def print_report(analysis: dict):
     for i, improvement in enumerate(analysis.get("priority_improvements", []), 1):
         print(f"   {i}. {improvement}")
 
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
 
 
 def save_report(analysis: dict, output_path: str):
@@ -163,11 +168,11 @@ def save_report(analysis: dict, output_path: str):
 
 
 def analyze_call_file(audio_path: str, manager_name: str = "Менеджер"):
-    print(f"\n{'='*60}")
-    print(f"ЗАПУСК АНАЛИЗА ЗВОНКА")
+    print(f"\n{'=' * 60}")
+    print("ЗАПУСК АНАЛИЗА ЗВОНКА")
     print(f"   Файл: {audio_path}")
     print(f"   Менеджер: {manager_name}")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
     transcript = transcribe_audio(audio_path)
 
@@ -176,12 +181,14 @@ def analyze_call_file(audio_path: str, manager_name: str = "Менеджер"):
         f.write(transcript)
     print(f"   Транскрипция сохранена: {transcript_file}")
 
-    analysis = analyze_call(transcript, manager_name)
+    analysis, was_truncated = analyze_call(transcript, manager_name)
+    if was_truncated:
+        print(f"⚠️  Транскрипт длиннее {MAX_TRANSCRIPT_CHARS} символов — анализ по первой части.")
+
     print_report(analysis)
 
     output_file = audio_path.rsplit(".", 1)[0] + "_report.json"
     save_report(analysis, output_file)
-
     return analysis
 
 
