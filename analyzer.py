@@ -2,34 +2,25 @@ import os
 import json
 from dotenv import load_dotenv
 import anthropic
-import whisper
+from groq import Groq
 
 load_dotenv()
 
 from stages import SALES_STAGES
 
-WHISPER_MODEL_SIZE = "small"
-CLAUDE_MODEL = "claude-opus-4-6"
+CLAUDE_MODEL = "claude-sonnet-4-6"
 MAX_TRANSCRIPT_CHARS = 12000
 
-_whisper_model = None
-
-
-def get_whisper_model():
-    global _whisper_model
-    if _whisper_model is None:
-        print(f"Загружаю модель Whisper ({WHISPER_MODEL_SIZE})...")
-        _whisper_model = whisper.load_model(WHISPER_MODEL_SIZE)
-        print("Модель загружена!")
-    return _whisper_model
-
-
-def transcribe_audio(audio_file_path: str, model=None) -> str:
+def transcribe_audio(audio_file_path: str) -> str:
     print(f"Транскрибирую аудио: {audio_file_path}")
-    if model is None:
-        model = get_whisper_model()
-    result = model.transcribe(audio_file_path, language="ru", verbose=False)
-    text = result["text"].strip()
+    client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+    with open(audio_file_path, "rb") as f:
+        result = client.audio.transcriptions.create(
+            file=(os.path.basename(audio_file_path), f),
+            model="whisper-large-v3-turbo",
+            language="ru",
+        )
+    text = result.text.strip()
     print(f"Транскрипция готова! Длина текста: {len(text)} символов")
     return text
 
@@ -175,11 +166,6 @@ def analyze_call_file(audio_path: str, manager_name: str = "Менеджер"):
     print(f"{'=' * 60}")
 
     transcript = transcribe_audio(audio_path)
-
-    transcript_file = audio_path.rsplit(".", 1)[0] + "_transcript.txt"
-    with open(transcript_file, "w", encoding="utf-8") as f:
-        f.write(transcript)
-    print(f"   Транскрипция сохранена: {transcript_file}")
 
     analysis, was_truncated = analyze_call(transcript, manager_name)
     if was_truncated:
