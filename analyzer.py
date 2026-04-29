@@ -13,15 +13,18 @@ from stages import SALES_STAGES
 CLAUDE_MODEL = "claude-sonnet-4-6"
 MAX_TRANSCRIPT_CHARS = 12000
 
-# Подсказки для Whisper — правильное написание брендов и проектов
-TRANSCRIPTION_PROMPT = (
+_TRANSCRIPTION_BASE = (
     "Разговор менеджера по продажам недвижимости с клиентом. "
-    "Названия проектов и застройщиков: А101, Брусника, ПИК, Самолёт, Эталон, "
-    "Донстрой, MR Group, Страна Девелопмент, Инград, Гранель, Sminex, ФСК, "
-    "Баркли, Колди, Центр-Инвест, Горячесть, ЖК, апартаменты, ипотека, эскроу."
+    "Термины: ЖК, апартаменты, ипотека, эскроу, застройщик, показ, встреча."
 )
 
 GROQ_SIZE_LIMIT = 24 * 1024 * 1024  # 24 МБ — запас до лимита 25 МБ
+
+
+def _build_transcription_prompt(jk_names: list) -> str:
+    if jk_names:
+        return _TRANSCRIPTION_BASE + " Названия проектов: " + ", ".join(jk_names) + "."
+    return _TRANSCRIPTION_BASE
 
 
 def _compress_to_mp3(audio_path: str) -> str:
@@ -37,7 +40,7 @@ def _compress_to_mp3(audio_path: str) -> str:
     return tmp.name
 
 
-def transcribe_audio(audio_file_path: str) -> str:
+def transcribe_audio(audio_file_path: str, jk_names: list = None) -> str:
     print(f"Транскрибирую аудио: {audio_file_path}")
 
     compressed_path = None
@@ -56,7 +59,7 @@ def transcribe_audio(audio_file_path: str) -> str:
                 file=(os.path.basename(send_path), f),
                 model="whisper-large-v3-turbo",
                 language="ru",
-                prompt=TRANSCRIPTION_PROMPT,
+                prompt=_build_transcription_prompt(jk_names or []),
             )
     finally:
         if compressed_path:
@@ -76,7 +79,7 @@ def _build_stages_text() -> str:
     return stages_text
 
 
-def analyze_call(transcript: str, manager_name: str = "Менеджер") -> tuple[dict, bool]:
+def analyze_call(transcript: str, manager_name: str = "Менеджер", jk_names: list = None) -> tuple[dict, bool]:
     """Возвращает (анализ, был_ли_обрезан_транскрипт)."""
     print("\nАнализирую звонок с помощью Claude...")
 
@@ -102,7 +105,11 @@ def analyze_call(transcript: str, manager_name: str = "Менеджер") -> tup
         f'  "manager_name": "{manager_name}",\n'
         '  "overall_score": число от 0 до 100,\n'
         '  "call_summary": "краткое описание звонка в 2-3 предложениях",\n'
-        '  "residential_complex": "название ЖК — строго одно из: А101 Лаголово, А101 Всеволожск. Определи по контексту. Если ЖК не упомянут — Не определён",\n'
+        '  "residential_complex": "' + (
+            "название ЖК — строго одно из: " + ", ".join(jk_names) + ". Определи по контексту. Если ни одно не подходит — Не определён"
+            if jk_names else
+            "название ЖК или жилого комплекса из разговора. Если не упомянут — Не определён"
+        ) + '",\n'
         '  "stages": [\n'
         '    {\n'
         '      "stage_name": "название этапа",\n'
@@ -145,8 +152,11 @@ def analyze_call(transcript: str, manager_name: str = "Менеджер") -> tup
         "Если call_interrupted=true — не снижай overall_score за незавершённые этапы, оцени только то что успело произойти. "
         "В транскрипте могут быть ошибки распознавания речи — исправляй их по контексту: "
         "неправильные названия ЖК, бессмысленные слова, искажённые цифры. "
-        "Названия ЖК — только А101 Лаголово или А101 Всеволожск, любые искажения (Севоложск, лагуна, девушек и т.п.) исправляй на правильное по контексту. "
-        "В цитатах используй исправленный вариант."
+        + (
+            "Названия ЖК — только из списка: " + ", ".join(jk_names) + ". Любые искажения исправляй по контексту. "
+            if jk_names else ""
+        )
+        + "В цитатах используй исправленный вариант."
     )
 
     response = claude.messages.create(

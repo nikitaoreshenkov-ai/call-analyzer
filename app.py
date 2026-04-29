@@ -94,6 +94,18 @@ AUDIO_EXTENSIONS = {".mp3", ".m4a", ".wav", ".ogg", ".mp4"}
 st.title("Анализ звонков")
 st.divider()
 
+# ── Список ЖК (общий для обеих вкладок) ──────────────────────────────────────
+with st.expander("⚙️ Настройки: названия ЖК для этого батча", expanded=False):
+    st.caption("Укажите точные названия жилых комплексов — по одному на строке. Claude и Whisper будут использовать их при распознавании.")
+    jk_input = st.text_area(
+        "Названия ЖК",
+        placeholder="А101 Лаголово\nА101 Всеволожск",
+        height=100,
+        label_visibility="collapsed",
+    )
+
+jk_names = [line.strip() for line in jk_input.splitlines() if line.strip()] if jk_input else []
+
 tab_upload, tab_folder = st.tabs(["📁 Загрузить файлы", "🗂 Папка на диске"])
 
 
@@ -115,10 +127,10 @@ def _process_files(file_entries: list[tuple[str, str]]):
         try:
             with st.spinner("Транскрибирую через Groq..."):
                 from analyzer import transcribe_audio
-                transcript = transcribe_audio(file_path)
+                transcript = transcribe_audio(file_path, jk_names=jk_names or None)
 
             with st.spinner("Анализирую через Claude..."):
-                result, was_truncated = analyze_call(transcript, phone)
+                result, was_truncated = analyze_call(transcript, phone, jk_names=jk_names or None)
 
             save_result(phone, display_name, result, was_truncated)
 
