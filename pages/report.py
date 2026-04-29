@@ -30,6 +30,10 @@ if not data:
     st.warning("Нет звонков за выбранный период.")
     st.stop()
 
+# Прерванные звонки — выделяем отдельно, в статистику не включаем
+interrupted = [r for r in data if r["analysis"].get("report_flags", {}).get("call_interrupted")]
+data = [r for r in data if not r["analysis"].get("report_flags", {}).get("call_interrupted")]
+
 total = len(data)
 
 # ── Вспомогательная функция ───────────────────────────────────────────────────
@@ -63,7 +67,7 @@ col1, col2 = st.columns(2)
 with col1:
     st.markdown(f"- **Встреча предложена:** {pct(len(meeting_done))} звонков — менеджер пригласил на встречу или показ.")
     st.markdown(f"- **Клиент согласился на встречу:** {pct(len(meeting_agreed))} звонков — договорились о встрече.")
-    st.markdown(f"- **Пассивные продажи:** В {pct(len(passive))} случаев менеджеры не пригласили на встречу, ограничившись перепиской.")
+    st.markdown(f"- **Пассивные продажи:** {pct(len(passive))} звонков завершились без активного приглашения клиента.")
     st.markdown(f"- **Расхождение в цене больше 10%:** {pct(len(price_miss))} обращений сопровождались предложением с завышением цены относительно бюджета клиента.")
 with col2:
     st.markdown(f"- **Планирование покупки на срок более 6 месяцев:** {pct(len(long_term))} клиентов планируют покупку более чем через 6 месяцев.")
@@ -137,7 +141,7 @@ render_category(
 # ── Пассивные продажи ─────────────────────────────────────────────────────────
 
 render_category(
-    "Пассивные продажи (WhatsApp вместо встречи)",
+    "Пассивные продажи",
     passive,
     [("Чем завершился разговор", lambda f, r: f.get("passive_sale_comment") or "—")],
 )
@@ -153,13 +157,31 @@ render_category(
 # ── Результат по встречам ─────────────────────────────────────────────────────
 
 render_category(
-    "Встреча предложена менеджером",
+    "Менеджер предложил встречу",
     meeting_done,
     [
         ("Клиент согласился", lambda f, r: "✅ Да" if f.get("meeting_agreed") else "❌ Нет"),
         ("Итог", lambda f, r: f.get("meeting_result_comment") or "—"),
     ],
 )
+
+# ── Прерванные звонки ─────────────────────────────────────────────────────────
+
+st.subheader("Прерванные звонки")
+st.caption("Звонки прервались по техническим причинам — не по вине менеджера. В общую статистику не включены.")
+if interrupted:
+    import pandas as pd
+    rows_int = []
+    for r in interrupted:
+        f = r["analysis"].get("report_flags", {})
+        rows_int.append({
+            "ЖК": r["analysis"].get("residential_complex", "Не определён"),
+            "Телефон": r.get("phone", "—"),
+            "О чём успели поговорить": f.get("interrupted_comment") or "—",
+        })
+    st.dataframe(pd.DataFrame(rows_int), use_container_width=True, hide_index=True)
+else:
+    st.success("Прерванных звонков не выявлено.")
 
 st.divider()
 
@@ -205,31 +227,26 @@ else:
 
 st.divider()
 
-# ── Генерация HTML-отчёта ─────────────────────────────────────────────────────
+# ── Генерация объединённого HTML-отчёта ──────────────────────────────────────
 
 def build_html_report() -> str:
-    def table_html(rows: list[dict], cols: list[tuple]) -> str:
+    now = datetime.now().strftime("%d.%m.%Y %H:%M")
+    period = f"{min(selected_dates)} — {max(selected_dates)}" if selected_dates else "все даты"
+
+    def tbl(rows: list[dict], cols: list[tuple]) -> str:
         if not rows:
-            return "<p style='color:#27ae60'>Случаев не выявлено.</p>"
+            return "<p class='ok'>Случаев не выявлено.</p>"
         headers = ["ЖК", "Телефон"] + [c[0] for c in cols]
         th = "".join(f"<th>{h}</th>" for h in headers)
         body = ""
         for r in rows:
             f = r["analysis"]["report_flags"]
-            cells = [
-                r["analysis"].get("residential_complex", "Не определён"),
-                r.get("phone", "—"),
-            ] + [fn(f, r) for _, fn in cols]
+            cells = [r["analysis"].get("residential_complex", "Не определён"), r.get("phone", "—")] + [fn(f, r) for _, fn in cols]
             body += "<tr>" + "".join(f"<td>{c}</td>" for c in cells) + "</tr>"
         return f"<table><thead><tr>{th}</tr></thead><tbody>{body}</tbody></table>"
 
-    def section(title: str, rows: list[dict], cols: list[tuple]) -> str:
-        count = len(rows)
-        return f"""
-        <h2>{title}</h2>
-        <p class="count">{count} шт. из {total} шт. ({pct(count)})</p>
-        {table_html(rows, cols)}
-        """
+    def sec(title: str, rows: list[dict], cols: list[tuple]) -> str:
+        return f"<h2>{title}</h2><p class='count'>{len(rows)} шт. из {total} шт. ({pct(len(rows))})</p>{tbl(rows, cols)}"
 
     price_cols = [
         ("Бюджет клиента",    lambda f, r: f.get("client_budget") or "—"),
@@ -238,70 +255,150 @@ def build_html_report() -> str:
         ("Комментарий",       lambda f, r: f.get("price_mismatch_comment") or "—"),
     ]
 
-    now = datetime.now().strftime("%d.%m.%Y %H:%M")
-    period = f"{min(selected_dates)} — {max(selected_dates)}" if selected_dates else "все даты"
+    # Часть 3 — история звонков
+    all_results = load_all_results()
+    all_for_html = [r for r in all_results if r.get("analyzed_at", "")[:10] in selected_dates
+                    and r.get("analysis", {}).get("report_flags")
+                    and not r["analysis"]["report_flags"].get("call_interrupted")]
+
+    def score_color(s: int) -> str:
+        return "#27ae60" if s >= 80 else "#f39c12" if s >= 60 else "#e74c3c"
+
+    def call_cards() -> str:
+        html_cards = ""
+        for r in sorted(all_for_html, key=lambda x: x["analysis"].get("overall_score", 0)):
+            a = r["analysis"]
+            score = a.get("overall_score", 0)
+            color = score_color(score)
+            stages_html = ""
+            for st in a.get("stages", []):
+                icon = "✅" if st.get("completed") else "❌"
+                stages_html += f"""
+                <tr>
+                  <td>{icon} {st.get('stage_name','')}</td>
+                  <td style="text-align:center">{st.get('score',0)}/10</td>
+                  <td>{st.get('what_was_missed') or '—'}</td>
+                  <td>{st.get('recommendation') or '—'}</td>
+                </tr>"""
+            html_cards += f"""
+            <div class="card">
+              <div class="card-header">
+                <span class="phone">{r.get('phone','—')}</span>
+                <span class="score" style="color:{color}">{score}/100</span>
+                <span class="jk">{a.get('residential_complex','')}</span>
+              </div>
+              <p class="summary-text">{a.get('call_summary','')}</p>
+              <table>
+                <thead><tr><th>Этап</th><th>Балл</th><th>Что пропущено</th><th>Рекомендация</th></tr></thead>
+                <tbody>{stages_html}</tbody>
+              </table>
+            </div>"""
+        return html_cards
+
+    # Прерванные в HTML
+    interrupted_tbl = ""
+    if interrupted:
+        rows_int = "".join(
+            f"<tr><td>{r['analysis'].get('residential_complex','—')}</td>"
+            f"<td>{r.get('phone','—')}</td>"
+            f"<td>{r['analysis'].get('report_flags',{}).get('interrupted_comment','—')}</td></tr>"
+            for r in interrupted
+        )
+        interrupted_tbl = f"""
+        <h2>Прерванные звонки</h2>
+        <p class="count">{len(interrupted)} шт. — не включены в статистику</p>
+        <table><thead><tr><th>ЖК</th><th>Телефон</th><th>О чём успели поговорить</th></tr></thead>
+        <tbody>{rows_int}</tbody></table>"""
+
+    recs_html = ""
+    if recs:
+        items = "".join(f"<li>{rec.replace('**','')}</li>" for rec in recs)
+        recs_html = f"<h2>Рекомендации</h2><ol>{items}</ol>"
+    else:
+        recs_html = "<p class='ok'>Критичных проблем не выявлено.</p>"
 
     return f"""<!DOCTYPE html>
 <html lang="ru">
 <head>
 <meta charset="utf-8">
-<title>Отчёт по звонкам</title>
+<title>Анализ звонков</title>
 <style>
-  body {{ font-family: Arial, sans-serif; font-size: 14px; color: #1a1a2e; margin: 40px; }}
-  h1 {{ font-size: 24px; margin-bottom: 4px; }}
-  h2 {{ font-size: 17px; margin-top: 36px; border-bottom: 2px solid #e74c3c; padding-bottom: 4px; color: #c0392b; }}
-  .meta {{ color: #666; font-size: 13px; margin-bottom: 32px; }}
-  .count {{ font-size: 13px; color: #555; margin: 4px 0 10px; }}
-  .summary {{ background: #f8f9fa; border-left: 4px solid #e74c3c; padding: 12px 16px; margin-bottom: 32px; }}
-  .summary li {{ margin: 6px 0; }}
-  table {{ border-collapse: collapse; width: 100%; margin-top: 8px; font-size: 13px; }}
-  th {{ background: #1a1a2e; color: white; padding: 8px 10px; text-align: left; }}
-  td {{ padding: 7px 10px; border-bottom: 1px solid #e0e0e0; vertical-align: top; }}
-  tr:nth-child(even) td {{ background: #f8f9fa; }}
-  p {{ margin: 4px 0; }}
+  * {{ box-sizing: border-box; }}
+  body {{ font-family: Arial, sans-serif; font-size: 13px; color: #1a1a2e; margin: 0; padding: 0; }}
+  .page {{ max-width: 1100px; margin: 0 auto; padding: 40px 32px; }}
+  h1 {{ font-size: 26px; margin-bottom: 4px; }}
+  h2 {{ font-size: 16px; margin-top: 40px; border-bottom: 2px solid #e74c3c; padding-bottom: 4px; color: #c0392b; page-break-after: avoid; }}
+  h3 {{ font-size: 15px; margin-top: 32px; color: #1a1a2e; border-bottom: 1px solid #ddd; padding-bottom: 3px; }}
+  .meta {{ color: #888; font-size: 12px; margin-bottom: 28px; }}
+  .count {{ font-size: 12px; color: #666; margin: 4px 0 8px; }}
+  .ok {{ color: #27ae60; }}
+  .kpi-grid {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin: 16px 0 28px; }}
+  .kpi {{ background: #f8f9fa; border-radius: 6px; padding: 12px 14px; }}
+  .kpi-label {{ font-size: 11px; color: #888; margin-bottom: 4px; }}
+  .kpi-value {{ font-size: 22px; font-weight: bold; color: #1a1a2e; }}
+  .summary-box {{ background: #fff8f8; border-left: 4px solid #e74c3c; padding: 12px 16px; margin: 12px 0 28px; }}
+  .summary-box li {{ margin: 5px 0; }}
+  table {{ border-collapse: collapse; width: 100%; margin-top: 8px; font-size: 12px; }}
+  th {{ background: #1a1a2e; color: white; padding: 7px 10px; text-align: left; }}
+  td {{ padding: 6px 10px; border-bottom: 1px solid #e8e8e8; vertical-align: top; }}
+  tr:nth-child(even) td {{ background: #fafafa; }}
+  .section-break {{ page-break-before: always; }}
+  .card {{ border: 1px solid #e0e0e0; border-radius: 6px; margin: 16px 0; padding: 16px; page-break-inside: avoid; }}
+  .card-header {{ display: flex; align-items: baseline; gap: 16px; margin-bottom: 8px; }}
+  .phone {{ font-size: 15px; font-weight: bold; }}
+  .score {{ font-size: 18px; font-weight: bold; }}
+  .jk {{ font-size: 12px; color: #888; }}
+  .summary-text {{ color: #555; margin: 0 0 10px; font-size: 12px; }}
+  ol li {{ margin: 6px 0; }}
 </style>
 </head>
 <body>
-<h1>Анализ звонков</h1>
-<div class="meta">Сформировано: {now} &nbsp;|&nbsp; Период: {period} &nbsp;|&nbsp; Всего номеров: {total} шт.</div>
+<div class="page">
 
-<div class="summary">
-  <ul>
-    <li><b>Пассивные продажи:</b> В {pct(len(passive))} случаев менеджеры не пригласили на встречу, ограничившись перепиской.</li>
-    <li><b>Расхождение в цене больше 10%:</b> {pct(len(price_miss))} обращений сопровождались предложением с завышением цены относительно бюджета клиента.</li>
-    <li><b>Планирование покупки на срок более 6 месяцев:</b> {pct(len(long_term))} клиентов планируют покупку более чем через 6 месяцев.</li>
-    <li><b>Нецелевые звонки:</b> {pct(len(non_target))} звонков не связаны с покупкой.</li>
-    <li><b>Встреча не предложена:</b> {pct(len(no_meeting))} случаев, когда встреча была уместна, но менеджер её не предложил.</li>
-  </ul>
+<h1>Анализ звонков</h1>
+<div class="meta">Сформировано: {now} &nbsp;|&nbsp; Период: {period} &nbsp;|&nbsp; Звонков в выборке: {total} шт.</div>
+
+<!-- ЧАСТЬ 1: СВОДНЫЕ ПОКАЗАТЕЛИ -->
+<h3>Сводные показатели</h3>
+<div class="kpi-grid">
+  <div class="kpi"><div class="kpi-label">Средний балл</div><div class="kpi-value">{avg_score:.0f}/100</div></div>
+  <div class="kpi"><div class="kpi-label">Встреча предложена</div><div class="kpi-value">{pct(len(meeting_done))}</div></div>
+  <div class="kpi"><div class="kpi-label">Договорились о встрече</div><div class="kpi-value">{pct(len(meeting_agreed))}</div></div>
+  <div class="kpi"><div class="kpi-label">Пассивные продажи</div><div class="kpi-value">{pct(len(passive))}</div></div>
+  <div class="kpi"><div class="kpi-label">Нецелевые звонки</div><div class="kpi-value">{pct(len(non_target))}</div></div>
+  <div class="kpi"><div class="kpi-label">Расхождение цены &gt;10%</div><div class="kpi-value">{pct(len(price_miss))}</div></div>
+  <div class="kpi"><div class="kpi-label">Долгосрочные покупатели</div><div class="kpi-value">{pct(len(long_term))}</div></div>
+  <div class="kpi"><div class="kpi-label">Встреча не предложена</div><div class="kpi-value">{pct(len(no_meeting))}</div></div>
 </div>
 
-{section("Расхождение в цене больше, чем 10%", price_miss, price_cols)}
-{section("Планирование покупки на срок более 6 месяцев", long_term, [("Комментарий", lambda f, r: f.get("long_term_comment") or "—")])}
-{section("Нецелевые звонки", non_target, [("Комментарий", lambda f, r: f.get("non_target_comment") or "—")])}
-{section("Пассивные продажи (WhatsApp вместо встречи)", passive, [("Чем завершился разговор", lambda f, r: f.get("passive_sale_comment") or "—")])}
-{section("Приглашение на встречу требовалось, но не предложили", no_meeting, [("Комментарий", lambda f, r: f.get("meeting_comment") or "—")])}
+{recs_html}
 
-<h2>Сводные показатели</h2>
-<table style="width:auto; min-width:400px">
-  <tr><th>Показатель</th><th>Значение</th></tr>
-  <tr><td>Средний балл</td><td><b>{avg_score:.0f} / 100</b></td></tr>
-  <tr><td>Встреча предложена</td><td>{pct(len(meeting_done))}</td></tr>
-  <tr><td>Договорились о встрече</td><td>{pct(len(meeting_agreed))}</td></tr>
-  <tr><td>Пассивные продажи</td><td>{pct(len(passive))}</td></tr>
-  <tr><td>Нецелевые звонки</td><td>{pct(len(non_target))}</td></tr>
-  <tr><td>Расхождение цены &gt;10%</td><td>{pct(len(price_miss))}</td></tr>
-  <tr><td>Долгосрочные покупатели</td><td>{pct(len(long_term))}</td></tr>
-  <tr><td>Встреча не предложена</td><td>{pct(len(no_meeting))}</td></tr>
-</table>
-{"<h2>Рекомендации</h2><ol>" + "".join(f"<li>{r}</li>" for r in recs) + "</ol>" if recs else "<p style='color:#27ae60'>Критичных проблем не выявлено.</p>"}
+<!-- ЧАСТЬ 2: КАТЕГОРИИ ПРОБЛЕМ -->
+<h3 class="section-break">Детализация по категориям</h3>
 
+{sec("Расхождение в цене больше 10%", price_miss, price_cols)}
+{sec("Планирование покупки более чем через 6 месяцев", long_term, [("Комментарий", lambda f, r: f.get("long_term_comment") or "—")])}
+{sec("Нецелевые звонки", non_target, [("Комментарий", lambda f, r: f.get("non_target_comment") or "—")])}
+{sec("Пассивные продажи", passive, [("Чем завершился разговор", lambda f, r: f.get("passive_sale_comment") or "—")])}
+{sec("Встреча уместна, но не предложена", no_meeting, [("Комментарий", lambda f, r: f.get("meeting_comment") or "—")])}
+{sec("Менеджер предложил встречу", meeting_done, [
+    ("Клиент согласился", lambda f, r: "Да" if f.get("meeting_agreed") else "Нет"),
+    ("Итог", lambda f, r: f.get("meeting_result_comment") or "—"),
+])}
+{interrupted_tbl}
+
+<!-- ЧАСТЬ 3: ИСТОРИЯ ЗВОНКОВ -->
+<h3 class="section-break">История звонков — детальный разбор</h3>
+{call_cards()}
+
+</div>
 </body>
 </html>"""
 
 
 html = build_html_report()
 st.download_button(
-    label="⬇️ Скачать отчёт (HTML → открой в браузере → распечатай в PDF)",
+    label="⬇️ Скачать полный отчёт (HTML → открой в браузере → распечатай в PDF)",
     data=html.encode("utf-8"),
     file_name=f"report_{datetime.now().strftime('%Y%m%d')}.html",
     mime="text/html",
