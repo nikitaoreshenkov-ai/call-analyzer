@@ -20,21 +20,33 @@ if not flagged:
 
 dates = sorted({r.get("analyzed_at", "")[:10] for r in flagged}, reverse=True)
 selected_dates = st.multiselect("Период (по дате анализа)", dates, default=dates)
-data = [r for r in flagged if r.get("analyzed_at", "")[:10] in selected_dates]
+data_all = [r for r in flagged if r.get("analyzed_at", "")[:10] in selected_dates]
 
-if not data:
+if not data_all:
     st.warning("Нет звонков за выбранный период.")
     st.stop()
 
-# Прерванные — отдельно, в статистику не включаем
-interrupted = [r for r in data if r["analysis"].get("report_flags", {}).get("call_interrupted")]
-data = [r for r in data if not r["analysis"].get("report_flags", {}).get("call_interrupted")]
+FUNNEL_SCORE_THRESHOLD = 40
+
+not_in_funnel = [r for r in data_all if r["analysis"].get("overall_score", 0) < FUNNEL_SCORE_THRESHOLD]
+data = [r for r in data_all if r["analysis"].get("overall_score", 0) >= FUNNEL_SCORE_THRESHOLD]
 
 if not data:
-    st.warning("Все звонки в выбранном периоде прерваны — нет данных для статистики.")
+    st.warning("Все звонки имеют балл ниже 40 — нет данных для статистики.")
     st.stop()
 
 total = len(data)
+
+
+def _truncate_at_sentence(text: str, max_len: int = 250) -> str:
+    if len(text) <= max_len:
+        return text
+    chunk = text[:max_len]
+    for sep in (". ", "! ", "? "):
+        pos = chunk.rfind(sep)
+        if pos > max_len // 2:
+            return chunk[:pos + 1]
+    return chunk.rstrip() + "…"
 
 
 def flag_rows(flag_key: str) -> list:
@@ -56,6 +68,9 @@ meeting_agreed = flag_rows("meeting_agreed")
 scores    = [r["analysis"].get("overall_score", 0) for r in data]
 avg_score = sum(scores) / len(scores) if scores else 0
 
+n_agreed = len(meeting_agreed)
+n_missed = len(no_meeting)
+
 # Рекомендации (вычисляем заранее — нужны и в Streamlit, и в HTML)
 recs = []
 p = lambda rows: len(rows) / total * 100
@@ -75,20 +90,89 @@ if p(non_target) > 15:
 st.subheader(f"Статистика — {total} звонков")
 
 c1, c2, c3, c4 = st.columns(4)
-c1.metric("Средний балл",         f"{avg_score:.0f} / 100")
-c2.metric("Встреча предложена",   pct(len(meeting_done)))
-c3.metric("Договорились",         pct(len(meeting_agreed)))
-c4.metric("Пассивные продажи",    pct(len(passive)))
+c1.metric("Средний балл",          f"{avg_score:.0f} / 100")
+c2.metric("Встреча предложена",    f"{len(meeting_done)} шт. ({pct(len(meeting_done))})")
+c3.metric("Договорились",          f"{n_agreed} шт. ({pct(n_agreed)})")
+c4.metric("Пассивные продажи",     f"{len(passive)} шт. ({pct(len(passive))})")
 
 c5, c6, c7, c8 = st.columns(4)
-c5.metric("Нецелевые звонки",     pct(len(non_target)))
-c6.metric("Расхождение цены >10%",pct(len(price_miss)))
-c7.metric("Долгосрочные клиенты", pct(len(long_term)))
-c8.metric("Встреча не предложена",pct(len(no_meeting)))
+c5.metric("Нецелевые звонки",      f"{len(non_target)} шт. ({pct(len(non_target))})")
+c6.metric("Расхождение цены >10%", f"{len(price_miss)} шт. ({pct(len(price_miss))})")
+c7.metric("Долгосрочные клиенты",  f"{len(long_term)} шт. ({pct(len(long_term))})")
+c8.metric("Встреча не предложена", f"{len(no_meeting)} шт. ({pct(len(no_meeting))})")
 
 st.divider()
 
-# ── 2. ДЕТАЛИЗАЦИЯ ────────────────────────────────────────────────────────────
+# ── 2. КОНВЕРСИЯ В ВСТРЕЧИ ────────────────────────────────────────────────────
+
+st.subheader("Конверсия в встречи")
+
+show_potential = st.checkbox("Показать потенциальную конверсию", value=False)
+
+
+def _bar_html(label: str, count: int, denom: int, color: str, note: str = "") -> str:
+    pct_val = count / denom * 100 if denom else 0
+    fill = min(pct_val, 100)
+    return f"""
+    <div style="margin:10px 0 20px">
+      <div style="display:flex;justify-content:space-between;font-size:14px;margin-bottom:6px">
+        <span style="font-weight:600">{label}</span>
+        <span style="color:#444"><b>{count}</b> из <b>{denom}</b> звонков &nbsp;&mdash;&nbsp;
+          <b style="font-size:16px">{pct_val:.1f}%</b>{note}</span>
+      </div>
+      <div style="background:#e9ecef;border-radius:8px;height:34px;overflow:hidden">
+        <div style="background:{color};width:{fill}%;height:100%;border-radius:8px;
+                    display:flex;align-items:center;padding-left:12px;
+                    color:white;font-size:14px;font-weight:bold;white-space:nowrap;overflow:hidden">
+          {pct_val:.1f}%
+        </div>
+      </div>
+    </div>"""
+
+
+bars = _bar_html("Фактически договорились о встрече", n_agreed, total, "#27ae60")
+if show_potential:
+    bars += _bar_html(
+        "Потенциал (включая тех, кому не предложили)",
+        n_agreed + n_missed, total, "#3498db",
+        note=f" &nbsp;&nbsp;<span style='color:#888;font-size:12px'>(+{n_missed} упущенных)</span>",
+    )
+
+st.markdown(bars, unsafe_allow_html=True)
+
+# «Не попали в воронку» — отдельный блок с потенциалом
+nif_total  = len(not_in_funnel)
+nif_missed = sum(
+    1 for r in not_in_funnel
+    if r["analysis"].get("report_flags", {}).get("meeting_required_not_done")
+)
+
+label_nif = f"Не попали в воронку — {nif_total} шт. (score < 40, не в статистике)"
+with st.expander(label_nif, expanded=bool(not_in_funnel)):
+    if nif_total and nif_missed:
+        nif_pct = nif_missed / nif_total * 100
+        st.markdown(
+            f"""<div style="background:#fff3cd;border-left:4px solid #f0ad4e;
+                            border-radius:4px;padding:10px 16px;margin-bottom:12px;font-size:13px">
+              В этой группе менеджер мог предложить встречу, но не предложил:
+              <b>{nif_missed} из {nif_total} звонков ({nif_pct:.1f}%)</b>.
+            </div>""",
+            unsafe_allow_html=True,
+        )
+    if not_in_funnel:
+        rows_nif = [{
+            "Балл":    r["analysis"].get("overall_score", 0),
+            "ЖК":      r["analysis"].get("residential_complex", "Не определён"),
+            "Телефон": r.get("phone", "—"),
+            "Резюме":  _truncate_at_sentence(r["analysis"].get("call_summary", "—")),
+        } for r in sorted(not_in_funnel, key=lambda x: x["analysis"].get("overall_score", 0))]
+        st.dataframe(pd.DataFrame(rows_nif), use_container_width=True, hide_index=True)
+    else:
+        st.success("Таких звонков не выявлено.")
+
+st.divider()
+
+# ── 3. ДЕТАЛИЗАЦИЯ ────────────────────────────────────────────────────────────
 
 st.subheader("Детализация по категориям")
 
@@ -112,7 +196,7 @@ def render_category(title: str, rows: list, columns: list):
         st.dataframe(pd.DataFrame(table_rows), use_container_width=True, hide_index=True)
 
 
-render_category("Расхождение в цене >10%", price_miss, [
+render_category("Расхождение в цене >10% (возможно, объектов дешевле нет у застройщика)", price_miss, [
     ("Бюджет клиента",    lambda f, r: f.get("client_budget") or "—"),
     ("Предложенная цена", lambda f, r: f.get("offered_price") or "—"),
     ("Разница",           lambda f, r: f"+{f['price_diff_percent']:.1f}%" if f.get("price_diff_percent") else "—"),
@@ -136,22 +220,9 @@ render_category("Менеджер предложил встречу", meeting_do
     ("Итог",              lambda f, r: f.get("meeting_result_comment") or "—"),
 ])
 
-# Прерванные звонки
-label_int = f"Прерванные звонки — {len(interrupted)} шт. (не включены в статистику)"
-with st.expander(label_int, expanded=bool(interrupted)):
-    if interrupted:
-        rows_int = [{
-            "ЖК":      r["analysis"].get("residential_complex", "Не определён"),
-            "Телефон": r.get("phone", "—"),
-            "О чём успели поговорить": r["analysis"].get("report_flags", {}).get("interrupted_comment") or "—",
-        } for r in interrupted]
-        st.dataframe(pd.DataFrame(rows_int), use_container_width=True, hide_index=True)
-    else:
-        st.success("Прерванных звонков не выявлено.")
-
 st.divider()
 
-# ── 3. ВЫВОДЫ ─────────────────────────────────────────────────────────────────
+# ── 4. ВЫВОДЫ ─────────────────────────────────────────────────────────────────
 
 st.subheader("Выводы и рекомендации")
 if recs:
@@ -196,12 +267,12 @@ def build_html_report() -> str:
         ("Комментарий",       lambda f, r: f.get("price_mismatch_comment") or "—"),
     ]
 
-    # История звонков
+    # История звонков — только score >= 40
     all_results  = load_all_results()
     all_for_html = [r for r in all_results
                     if r.get("analyzed_at", "")[:10] in selected_dates
                     and r.get("analysis", {}).get("report_flags")
-                    and not r["analysis"]["report_flags"].get("call_interrupted")]
+                    and r["analysis"].get("overall_score", 0) >= FUNNEL_SCORE_THRESHOLD]
 
     def score_color(s):
         return "#27ae60" if s >= 80 else "#f39c12" if s >= 60 else "#e74c3c"
@@ -215,11 +286,12 @@ def build_html_report() -> str:
             stages_rows = ""
             for st_item in a.get("stages", []):
                 icon = "✅" if st_item.get("completed") else "❌"
+                rec = st_item.get("recommendation") or "—" if st_item.get("score", 10) < 5 else "—"
                 stages_rows += (
                     f"<tr><td>{icon} {st_item.get('stage_name','')}</td>"
                     f"<td style='text-align:center'>{st_item.get('score',0)}/10</td>"
                     f"<td>{st_item.get('what_was_missed') or '—'}</td>"
-                    f"<td>{st_item.get('recommendation') or '—'}</td></tr>"
+                    f"<td>{rec}</td></tr>"
                 )
             summary_line = (
                 f"📞 {r.get('phone','—')} &nbsp;|&nbsp; "
@@ -239,23 +311,58 @@ def build_html_report() -> str:
             </details>"""
         return cards
 
-    # Прерванные в HTML
-    interrupted_html = ""
-    if interrupted:
-        int_rows = "".join(
-            f"<tr><td>{r['analysis'].get('residential_complex','—')}</td>"
-            f"<td>{r.get('phone','—')}</td>"
-            f"<td>{r['analysis'].get('report_flags',{}).get('interrupted_comment','—')}</td></tr>"
-            for r in interrupted
-        )
-        interrupted_html = f"""
-        <details>
-          <summary class="sec-title">Прерванные звонки <span class="sec-count">{len(interrupted)} шт. — не включены в статистику</span></summary>
-          <div class="sec-body">
-            <table><thead><tr><th>ЖК</th><th>Телефон</th><th>О чём успели поговорить</th></tr></thead>
-            <tbody>{int_rows}</tbody></table>
+    # Конверсия в HTML — обе полосы статично
+    def _html_bar(label, count, denom, color, note=""):
+        pct_val = count / denom * 100 if denom else 0
+        fill = min(pct_val, 100)
+        return f"""
+        <div style="margin:8px 0 16px">
+          <div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:5px">
+            <span style="font-weight:600">{label}</span>
+            <span><b>{count}</b> из <b>{denom}</b> &mdash; <b>{pct_val:.1f}%</b>{note}</span>
           </div>
-        </details>"""
+          <div style="background:#e9ecef;border-radius:6px;height:28px;overflow:hidden">
+            <div style="background:{color};width:{fill}%;height:100%;border-radius:6px;
+                        display:flex;align-items:center;padding-left:10px;
+                        color:white;font-size:12px;font-weight:bold">
+              {pct_val:.1f}%
+            </div>
+          </div>
+        </div>"""
+
+    conv_html = (
+        _html_bar("Фактически договорились о встрече", n_agreed, total, "#27ae60")
+        + _html_bar("Потенциал (+ кому не предложили)",
+                    n_agreed + n_missed, total, "#3498db",
+                    note=f" &nbsp;<span style='color:#888;font-size:11px'>(+{n_missed} упущенных)</span>")
+    )
+
+    # «Не попали в воронку» в HTML
+    nif_rows_html = "".join(
+        f"<tr><td>{r['analysis'].get('overall_score', 0)}</td>"
+        f"<td>{r['analysis'].get('residential_complex', '—')}</td>"
+        f"<td>{r.get('phone', '—')}</td>"
+        f"<td>{_truncate_at_sentence(r['analysis'].get('call_summary', '—'))}</td></tr>"
+        for r in sorted(not_in_funnel, key=lambda x: x["analysis"].get("overall_score", 0))
+    )
+    nif_note_html = (
+        f"<p style='color:#856404;background:#fff3cd;padding:8px 12px;"
+        f"border-radius:4px;margin:0 0 10px;font-size:12px'>"
+        f"Упущенных встреч в этой группе: <b>{nif_missed} из {nif_total} "
+        f"({nif_missed / nif_total * 100:.1f}%)</b></p>"
+        if nif_missed and nif_total else ""
+    )
+    not_in_funnel_html = f"""
+    <details>
+      <summary class="sec-title">Не попали в воронку
+        <span class="sec-count">{nif_total} шт. (score &lt; 40, не в статистике)</span>
+      </summary>
+      <div class="sec-body">
+        {nif_note_html}
+        <table><thead><tr><th>Балл</th><th>ЖК</th><th>Телефон</th><th>Резюме</th></tr></thead>
+        <tbody>{nif_rows_html}</tbody></table>
+      </div>
+    </details>"""
 
     recs_html = ("<ol>" + "".join(f"<li>{rec.replace('**','')}</li>" for rec in recs) + "</ol>") if recs \
                 else "<p class='ok'>Критичных проблем не выявлено.</p>"
@@ -277,6 +384,7 @@ def build_html_report() -> str:
   .kpi {{ background: #f8f9fa; border-radius: 6px; padding: 12px 14px; }}
   .kpi-label {{ font-size: 11px; color: #888; margin-bottom: 4px; }}
   .kpi-value {{ font-size: 20px; font-weight: bold; }}
+  .kpi-sub {{ font-size: 11px; color: #888; margin-top: 2px; }}
   details {{ margin: 8px 0; border: 1px solid #e0e0e0; border-radius: 6px; overflow: hidden; }}
   details[open] {{ border-color: #c0392b; }}
   summary {{ cursor: pointer; padding: 10px 14px; background: #f8f9fa; font-weight: 600; list-style: none; user-select: none; }}
@@ -304,20 +412,26 @@ def build_html_report() -> str:
 <h1>Анализ звонков</h1>
 <div class="meta">Сформировано: {now} &nbsp;|&nbsp; Период: {period} &nbsp;|&nbsp; Звонков: {total} шт.</div>
 
-<h2>Статистика</h2>
+<h2>Детальный разбор звонков</h2>
+{call_cards()}
+
+<h2 class="section-break">Статистика</h2>
 <div class="kpi-grid">
   <div class="kpi"><div class="kpi-label">Средний балл</div><div class="kpi-value">{avg_score:.0f}/100</div></div>
-  <div class="kpi"><div class="kpi-label">Встреча предложена</div><div class="kpi-value">{pct(len(meeting_done))}</div></div>
-  <div class="kpi"><div class="kpi-label">Договорились</div><div class="kpi-value">{pct(len(meeting_agreed))}</div></div>
-  <div class="kpi"><div class="kpi-label">Пассивные продажи</div><div class="kpi-value">{pct(len(passive))}</div></div>
-  <div class="kpi"><div class="kpi-label">Нецелевые звонки</div><div class="kpi-value">{pct(len(non_target))}</div></div>
-  <div class="kpi"><div class="kpi-label">Расхождение цены &gt;10%</div><div class="kpi-value">{pct(len(price_miss))}</div></div>
-  <div class="kpi"><div class="kpi-label">Долгосрочные клиенты</div><div class="kpi-value">{pct(len(long_term))}</div></div>
-  <div class="kpi"><div class="kpi-label">Встреча не предложена</div><div class="kpi-value">{pct(len(no_meeting))}</div></div>
+  <div class="kpi"><div class="kpi-label">Встреча предложена</div><div class="kpi-value">{len(meeting_done)}</div><div class="kpi-sub">{pct(len(meeting_done))}</div></div>
+  <div class="kpi"><div class="kpi-label">Договорились</div><div class="kpi-value">{n_agreed}</div><div class="kpi-sub">{pct(n_agreed)}</div></div>
+  <div class="kpi"><div class="kpi-label">Пассивные продажи</div><div class="kpi-value">{len(passive)}</div><div class="kpi-sub">{pct(len(passive))}</div></div>
+  <div class="kpi"><div class="kpi-label">Нецелевые звонки</div><div class="kpi-value">{len(non_target)}</div><div class="kpi-sub">{pct(len(non_target))}</div></div>
+  <div class="kpi"><div class="kpi-label">Расхождение цены &gt;10%</div><div class="kpi-value">{len(price_miss)}</div><div class="kpi-sub">{pct(len(price_miss))}</div></div>
+  <div class="kpi"><div class="kpi-label">Долгосрочные клиенты</div><div class="kpi-value">{len(long_term)}</div><div class="kpi-sub">{pct(len(long_term))}</div></div>
+  <div class="kpi"><div class="kpi-label">Встреча не предложена</div><div class="kpi-value">{len(no_meeting)}</div><div class="kpi-sub">{pct(len(no_meeting))}</div></div>
 </div>
 
-<h2 class="section-break">Детализация по категориям</h2>
-{sec("Расхождение в цене >10%", price_miss, price_cols)}
+<h2>Конверсия в встречи</h2>
+{conv_html}
+
+<h2>Детализация по категориям</h2>
+{sec("Расхождение в цене >10% (возможно, объектов дешевле нет у застройщика)", price_miss, price_cols)}
 {sec("Планирование покупки более чем через 6 месяцев", long_term, [("Комментарий", lambda f, r: f.get("long_term_comment") or "—")])}
 {sec("Нецелевые звонки", non_target, [("Комментарий", lambda f, r: f.get("non_target_comment") or "—")])}
 {sec("Пассивные продажи", passive, [("Чем завершился разговор", lambda f, r: f.get("passive_sale_comment") or "—")])}
@@ -326,13 +440,10 @@ def build_html_report() -> str:
     ("Клиент согласился", lambda f, r: "Да" if f.get("meeting_agreed") else "Нет"),
     ("Итог", lambda f, r: f.get("meeting_result_comment") or "—"),
 ])}
-{interrupted_html}
+{not_in_funnel_html}
 
 <h2>Выводы и рекомендации</h2>
 {recs_html}
-
-<h2 class="section-break">История звонков — детальный разбор</h2>
-{call_cards()}
 
 </div>
 </body>

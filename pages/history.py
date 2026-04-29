@@ -103,5 +103,5 @@ if phones:
                     st.error("Плохо: " + stage["what_was_missed"])
                 if stage.get("quote"):
                     st.warning("Цитата: " + stage["quote"])
-                if stage.get("recommendation"):
+                if stage.get("recommendation") and stage["score"] < 5:
                     st.info("Совет: " + stage["recommendation"])
