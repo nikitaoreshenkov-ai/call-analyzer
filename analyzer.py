@@ -1,5 +1,7 @@
 import os
 import json
+import subprocess
+import tempfile
 from dotenv import load_dotenv
 import anthropic
 from groq import Groq
@@ -11,15 +13,55 @@ from stages import SALES_STAGES
 CLAUDE_MODEL = "claude-sonnet-4-6"
 MAX_TRANSCRIPT_CHARS = 12000
 
+# Подсказки для Whisper — правильное написание брендов и проектов
+TRANSCRIPTION_PROMPT = (
+    "Разговор менеджера по продажам недвижимости с клиентом. "
+    "Названия проектов и застройщиков: А101, Брусника, ПИК, Самолёт, Эталон, "
+    "Донстрой, MR Group, Страна Девелопмент, Инград, Гранель, Sminex, ФСК, "
+    "Баркли, Колди, Центр-Инвест, Горячесть, ЖК, апартаменты, ипотека, эскроу."
+)
+
+GROQ_SIZE_LIMIT = 24 * 1024 * 1024  # 24 МБ — запас до лимита 25 МБ
+
+
+def _compress_to_mp3(audio_path: str) -> str:
+    """Сжимает аудио в MP3 128kbps через ffmpeg. Возвращает путь к временному файлу."""
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
+    tmp.close()
+    subprocess.run(
+        ["ffmpeg", "-y", "-i", audio_path, "-ar", "16000", "-ac", "1", "-b:a", "128k", tmp.name],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    return tmp.name
+
+
 def transcribe_audio(audio_file_path: str) -> str:
     print(f"Транскрибирую аудио: {audio_file_path}")
-    client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-    with open(audio_file_path, "rb") as f:
-        result = client.audio.transcriptions.create(
-            file=(os.path.basename(audio_file_path), f),
-            model="whisper-large-v3-turbo",
-            language="ru",
-        )
+
+    compressed_path = None
+    send_path = audio_file_path
+
+    if os.path.getsize(audio_file_path) > GROQ_SIZE_LIMIT:
+        print("Файл большой — сжимаю в MP3...")
+        compressed_path = _compress_to_mp3(audio_file_path)
+        send_path = compressed_path
+        print(f"Сжато: {os.path.getsize(compressed_path) / 1024 / 1024:.1f} МБ")
+
+    try:
+        client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+        with open(send_path, "rb") as f:
+            result = client.audio.transcriptions.create(
+                file=(os.path.basename(send_path), f),
+                model="whisper-large-v3-turbo",
+                language="ru",
+                prompt=TRANSCRIPTION_PROMPT,
+            )
+    finally:
+        if compressed_path:
+            os.unlink(compressed_path)
+
     text = result.text.strip()
     print(f"Транскрипция готова! Длина текста: {len(text)} символов")
     return text
@@ -88,13 +130,19 @@ def analyze_call(transcript: str, manager_name: str = "Менеджер") -> tup
         '    "non_target": true если звонок нецелевой (не покупка: документы, приёмка, другой вопрос) — иначе false,\n'
         '    "non_target_comment": "одно предложение — с каким вопросом позвонил клиент",\n'
         '    "meeting_required_not_done": true если встреча была уместна но менеджер не предложил — иначе false,\n'
-        '    "meeting_comment": "одно предложение — почему встреча была уместна и что произошло вместо"\n'
+        '    "meeting_comment": "одно предложение — почему встреча была уместна и что произошло вместо",\n'
+        '    "meeting_proposed": true если менеджер предложил встречу или показ — иначе false,\n'
+        '    "meeting_agreed": true если клиент согласился на встречу или показ — иначе false,\n'
+        '    "meeting_result_comment": "одно предложение — чем завершилось обсуждение встречи: договорились, клиент отказался, перенесли и т.д."\n'
         '  }\n'
         '}\n\n'
         "Отвечай строго в JSON формате, без дополнительного текста. "
         "Все поля на русском языке. "
         "Будь конкретным — приводи примеры из разговора. "
-        "Для report_flags будь строгим: ставь true только при явных признаках в тексте."
+        "Для report_flags будь строгим: ставь true только при явных признаках в тексте. "
+        "В транскрипте могут быть ошибки распознавания речи — исправляй их по контексту: "
+        "неправильные названия ЖК и застройщиков, бессмысленные слова, искажённые цифры. "
+        "В цитатах используй исправленный вариант."
     )
 
     response = claude.messages.create(

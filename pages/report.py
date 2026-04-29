@@ -51,19 +51,24 @@ def pct(n: int) -> str:
 
 st.subheader(f"Всего номеров: {total} шт.")
 
-passive       = flag_rows("passive_sale")
-price_miss    = flag_rows("price_mismatch")
-long_term     = flag_rows("long_term_buyer")
-non_target    = flag_rows("non_target")
-no_meeting    = flag_rows("meeting_required_not_done")
+passive         = flag_rows("passive_sale")
+price_miss      = flag_rows("price_mismatch")
+long_term       = flag_rows("long_term_buyer")
+non_target      = flag_rows("non_target")
+no_meeting      = flag_rows("meeting_required_not_done")
+meeting_done    = flag_rows("meeting_proposed")
+meeting_agreed  = flag_rows("meeting_agreed")
 
 col1, col2 = st.columns(2)
 with col1:
+    st.markdown(f"- **Встреча предложена:** {pct(len(meeting_done))} звонков — менеджер пригласил на встречу или показ.")
+    st.markdown(f"- **Клиент согласился на встречу:** {pct(len(meeting_agreed))} звонков — договорились о встрече.")
     st.markdown(f"- **Пассивные продажи:** В {pct(len(passive))} случаев менеджеры не пригласили на встречу, ограничившись перепиской.")
     st.markdown(f"- **Расхождение в цене больше 10%:** {pct(len(price_miss))} обращений сопровождались предложением с завышением цены относительно бюджета клиента.")
 with col2:
     st.markdown(f"- **Планирование покупки на срок более 6 месяцев:** {pct(len(long_term))} клиентов планируют покупку более чем через 6 месяцев.")
     st.markdown(f"- **Нецелевые звонки:** {pct(len(non_target))} звонков не связаны с покупкой.")
+    st.markdown(f"- **Встреча была уместна, но не предложена:** {pct(len(no_meeting))} случаев.")
 
 st.divider()
 
@@ -145,6 +150,59 @@ render_category(
     [("Комментарий", lambda f, r: f.get("meeting_comment") or "—")],
 )
 
+# ── Результат по встречам ─────────────────────────────────────────────────────
+
+render_category(
+    "Встреча предложена менеджером",
+    meeting_done,
+    [
+        ("Клиент согласился", lambda f, r: "✅ Да" if f.get("meeting_agreed") else "❌ Нет"),
+        ("Итог", lambda f, r: f.get("meeting_result_comment") or "—"),
+    ],
+)
+
+st.divider()
+
+# ── Сводные показатели ────────────────────────────────────────────────────────
+
+st.subheader("📊 Сводные показатели")
+
+scores = [r["analysis"].get("overall_score", 0) for r in data]
+avg_score = sum(scores) / len(scores) if scores else 0
+
+c1, c2, c3, c4 = st.columns(4)
+c1.metric("Средний балл", f"{avg_score:.0f} / 100")
+c2.metric("Встреча предложена", pct(len(meeting_done)))
+c3.metric("Договорились о встрече", pct(len(meeting_agreed)))
+c4.metric("Пассивные продажи", pct(len(passive)))
+
+c5, c6, c7, c8 = st.columns(4)
+c5.metric("Нецелевые звонки", pct(len(non_target)))
+c6.metric("Расхождение цены >10%", pct(len(price_miss)))
+c7.metric("Долгосрочные покупатели", pct(len(long_term)))
+c8.metric("Встреча не предложена", pct(len(no_meeting)))
+
+# Рекомендации — только если показатель превышает порог
+recs = []
+p = lambda rows: len(rows) / total * 100
+if p(passive) > 20:
+    recs.append(f"**Пассивные продажи {pct(len(passive))}** — ввести обязательный скрипт приглашения на показ в каждом целевом звонке.")
+if p(no_meeting) > 15:
+    recs.append(f"**Встреча не предложена {pct(len(no_meeting))}** — контролировать, чтобы менеджер предлагал встречу при наличии интереса.")
+if p(price_miss) > 10:
+    recs.append(f"**Расхождение цены {pct(len(price_miss))}** — менеджеры предлагают объекты выше бюджета клиента, усилить квалификацию перед презентацией.")
+if p(long_term) > 20:
+    recs.append(f"**Долгосрочные клиенты {pct(len(long_term))}** — настроить CRM-напоминания, не терять отложенный спрос.")
+if p(non_target) > 15:
+    recs.append(f"**Нецелевые звонки {pct(len(non_target))}** — разгрузить менеджеров, перенаправить нецелевые обращения.")
+
+st.markdown("**Рекомендации:**")
+if recs:
+    for i, rec in enumerate(recs, 1):
+        st.warning(f"{i}. {rec}")
+else:
+    st.success("Критичных проблем не выявлено.")
+
 st.divider()
 
 # ── Генерация HTML-отчёта ─────────────────────────────────────────────────────
@@ -222,6 +280,20 @@ def build_html_report() -> str:
 {section("Нецелевые звонки", non_target, [("Комментарий", lambda f, r: f.get("non_target_comment") or "—")])}
 {section("Пассивные продажи (WhatsApp вместо встречи)", passive, [("Чем завершился разговор", lambda f, r: f.get("passive_sale_comment") or "—")])}
 {section("Приглашение на встречу требовалось, но не предложили", no_meeting, [("Комментарий", lambda f, r: f.get("meeting_comment") or "—")])}
+
+<h2>Сводные показатели</h2>
+<table style="width:auto; min-width:400px">
+  <tr><th>Показатель</th><th>Значение</th></tr>
+  <tr><td>Средний балл</td><td><b>{avg_score:.0f} / 100</b></td></tr>
+  <tr><td>Встреча предложена</td><td>{pct(len(meeting_done))}</td></tr>
+  <tr><td>Договорились о встрече</td><td>{pct(len(meeting_agreed))}</td></tr>
+  <tr><td>Пассивные продажи</td><td>{pct(len(passive))}</td></tr>
+  <tr><td>Нецелевые звонки</td><td>{pct(len(non_target))}</td></tr>
+  <tr><td>Расхождение цены &gt;10%</td><td>{pct(len(price_miss))}</td></tr>
+  <tr><td>Долгосрочные покупатели</td><td>{pct(len(long_term))}</td></tr>
+  <tr><td>Встреча не предложена</td><td>{pct(len(no_meeting))}</td></tr>
+</table>
+{"<h2>Рекомендации</h2><ol>" + "".join(f"<li>{r}</li>" for r in recs) + "</ol>" if recs else "<p style='color:#27ae60'>Критичных проблем не выявлено.</p>"}
 
 </body>
 </html>"""

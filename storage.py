@@ -26,6 +26,16 @@ def save_result(phone: str, filename: str, analysis: dict, was_truncated: bool):
     return out_path
 
 
+def already_processed(phone: str) -> bool:
+    """Возвращает True если звонок с таким номером уже есть в результатах."""
+    _ensure_dir()
+    safe_phone = phone.replace("+", "").replace(" ", "")
+    for fname in os.listdir(RESULTS_DIR):
+        if fname.startswith(safe_phone) and fname.endswith(".json"):
+            return True
+    return False
+
+
 def load_all_results() -> list[dict]:
     _ensure_dir()
     results = []
