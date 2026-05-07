@@ -1,0 +1,194 @@
+[
+  {
+    "call_id": "144034381",
+    "expected_call_status": "in_funnel",
+    "expected_in_funnel": true,
+    "expected_review_required": false,
+    "expected_residential_complex": "А101 Всеволожск",
+    "expected_flags": {
+      "meeting_proposed": true,
+      "meeting_agreed": true,
+      "meeting_operationally_confirmed": true,
+      "client_not_ready": false,
+      "meeting_required_not_done": false,
+      "passive_sale": false,
+      "non_target": false
+    }
+  },
+  {
+    "call_id": "144002651",
+    "expected_call_status": "in_funnel",
+    "expected_in_funnel": true,
+    "expected_review_required": false,
+    "expected_residential_complex": "А101 Лаголово",
+    "expected_flags": {
+      "meeting_proposed": true,
+      "meeting_agreed": true,
+      "meeting_operationally_confirmed": true,
+      "client_not_ready": false,
+      "meeting_required_not_done": false,
+      "passive_sale": false,
+      "non_target": false
+    }
+  },
+  {
+    "call_id": "144034363",
+    "expected_call_status": "in_funnel",
+    "expected_in_funnel": true,
+    "expected_review_required": false,
+    "expected_residential_complex": "А101 Лаголово",
+    "expected_flags": {
+      "meeting_proposed": true,
+      "meeting_agreed": true,
+      "meeting_operationally_confirmed": true,
+      "client_not_ready": false,
+      "meeting_required_not_done": false,
+      "passive_sale": false,
+      "non_target": false
+    }
+  },
+  {
+    "call_id": "144034179",
+    "expected_call_status": "in_funnel",
+    "expected_in_funnel": true,
+    "expected_review_required": false,
+    "expected_residential_complex": "А101 Всеволожск",
+    "expected_flags": {
+      "meeting_proposed": false,
+      "meeting_agreed": false,
+      "meeting_operationally_confirmed": false,
+      "client_not_ready": false,
+      "meeting_required_not_done": false,
+      "passive_sale": false,
+      "non_target": false
+    }
+  },
+  {
+    "call_id": "144119900",
+    "expected_call_status": "out_of_funnel_interrupted",
+    "expected_in_funnel": false,
+    "expected_review_required": false,
+    "expected_residential_complex": "А101 Всеволожск",
+    "expected_flags": {
+      "meeting_proposed": false,
+      "meeting_agreed": false,
+      "meeting_operationally_confirmed": false,
+      "client_not_ready": false,
+      "meeting_required_not_done": false,
+      "passive_sale": false,
+      "non_target": false
+    }
+  },
+  {
+    "call_id": "144121459",
+    "expected_call_status": "in_funnel",
+    "expected_in_funnel": true,
+    "expected_review_required": false,
+    "expected_residential_complex": "А101 Лаголово",
+    "expected_flags": {
+      "meeting_proposed": true,
+      "meeting_agreed": true,
+      "meeting_operationally_confirmed": true,
+      "client_not_ready": false,
+      "meeting_required_not_done": false,
+      "passive_sale": false,
+      "non_target": false
+    }
+  },
+  {
+    "call_id": "144146187",
+    "expected_call_status": "in_funnel",
+    "expected_in_funnel": true,
+    "expected_review_required": false,
+    "expected_residential_complex": "А101 Всеволожск",
+    "expected_flags": {
+      "meeting_proposed": true,
+      "meeting_agreed": false,
+      "meeting_operationally_confirmed": false,
+      "client_not_ready": true,
+      "meeting_required_not_done": false,
+      "passive_sale": false,
+      "non_target": false
+    }
+  },
+  {
+    "call_id": "144522817",
+    "expected_call_status": "in_funnel",
+    "expected_in_funnel": true,
+    "expected_review_required": false,
+    "expected_residential_complex": "А101 Всеволожск",
+    "expected_flags": {
+      "meeting_proposed": true,
+      "meeting_agreed": false,
+      "meeting_operationally_confirmed": false,
+      "client_not_ready": true,
+      "meeting_required_not_done": false,
+      "passive_sale": false,
+      "non_target": false
+    }
+  },
+  {
+    "call_id": "144559005",
+    "expected_call_status": "in_funnel",
+    "expected_in_funnel": true,
+    "expected_review_required": false,
+    "expected_residential_complex": "А101 Лаголово",
+    "expected_flags": {
+      "meeting_proposed": true,
+      "meeting_agreed": true,
+      "meeting_operationally_confirmed": true,
+      "client_not_ready": false,
+      "meeting_required_not_done": false,
+      "passive_sale": false,
+      "non_target": false
+    }
+  },
+  {
+    "call_id": "144596252",
+    "expected_call_status": "in_funnel",
+    "expected_in_funnel": true,
+    "expected_review_required": false,
+    "expected_residential_complex": "А101 Всеволожск",
+    "expected_flags": {
+      "meeting_proposed": true,
+      "meeting_agreed": true,
+      "meeting_operationally_confirmed": true,
+      "client_not_ready": false,
+      "meeting_required_not_done": false,
+      "passive_sale": false,
+      "non_target": false
+    }
+  },
+  {
+    "call_id": "144626767",
+    "expected_call_status": "in_funnel",
+    "expected_in_funnel": true,
+    "expected_review_required": false,
+    "expected_residential_complex": "А101 Всеволожск",
+    "expected_flags": {
+      "meeting_proposed": true,
+      "meeting_agreed": true,
+      "meeting_operationally_confirmed": true,
+      "client_not_ready": false,
+      "meeting_required_not_done": false,
+      "passive_sale": false,
+      "non_target": false
+    }
+  },
+  {
+    "call_id": "144637616",
+    "expected_call_status": "out_of_funnel_non_target",
+    "expected_in_funnel": false,
+    "expected_review_required": false,
+    "expected_residential_complex": "Не определён",
+    "expected_flags": {
+      "meeting_proposed": false,
+      "meeting_agreed": false,
+      "meeting_operationally_confirmed": false,
+      "client_not_ready": false,
+      "meeting_required_not_done": false,
+      "passive_sale": false,
+      "non_target": true
+    }
+  }
+]

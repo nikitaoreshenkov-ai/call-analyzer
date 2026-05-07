@@ -1,0 +1,13 @@
+{
+  "valid_meeting_types": [
+    "onsite",
+    "online",
+    "both"
+  ],
+  "callback_later_without_dialog_out_of_funnel": true,
+  "interrupted_without_dialog_out_of_funnel": true,
+  "interrupted_after_dialog_out_of_funnel": true,
+  "non_target_out_of_funnel": true,
+  "callback_later_with_dialog_allows_followup_without_meeting": true,
+  "existing_appointment_service_calls_non_target": true
+}
