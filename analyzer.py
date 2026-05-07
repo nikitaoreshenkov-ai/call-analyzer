@@ -1,41 +1,34 @@
-from __future__ import annotations
-
-import json
 import os
-import re
+import json
 import subprocess
 import tempfile
-
-import anthropic
 from dotenv import load_dotenv
-from openai import OpenAI
-
-from jk_catalog import HousingComplexCatalog, load_reference_jk_aliases
-from models_v1 import ClientPolicy, CriterionSignal, EvidenceQuote, ExtractedCallFacts
-from rule_engine import DEFAULT_POLICY, score_call
-from client_paths import DEFAULT_CLIENT_ID
+import anthropic
+from groq import Groq
 
 load_dotenv()
 
+from stages import SALES_STAGES
+
 CLAUDE_MODEL = "claude-sonnet-4-6"
-MAX_TRANSCRIPT_CHARS = 18000
-CHUNK_OVERLAP_CHARS = 1500
+MAX_TRANSCRIPT_CHARS = 12000
 
 _TRANSCRIPTION_BASE = (
     "Разговор менеджера по продажам недвижимости с клиентом. "
-    "Термины: ЖК, апартаменты, ипотека, рассрочка, застройщик, показ, встреча."
+    "Термины: ЖК, апартаменты, ипотека, эскроу, застройщик, показ, встреча."
 )
 
-OPENAI_SIZE_LIMIT = 24 * 1024 * 1024
+GROQ_SIZE_LIMIT = 24 * 1024 * 1024  # 24 МБ — запас до лимита 25 МБ
 
 
-def _build_transcription_prompt(jk_names: list[str]) -> str:
+def _build_transcription_prompt(jk_names: list) -> str:
     if jk_names:
         return _TRANSCRIPTION_BASE + " Названия проектов: " + ", ".join(jk_names) + "."
     return _TRANSCRIPTION_BASE
 
 
 def _compress_to_mp3(audio_path: str) -> str:
+    """Сжимает аудио в MP3 128kbps через ffmpeg. Возвращает путь к временному файлу."""
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
     tmp.close()
     subprocess.run(
@@ -47,20 +40,24 @@ def _compress_to_mp3(audio_path: str) -> str:
     return tmp.name
 
 
-def transcribe_audio(audio_file_path: str, jk_names: list[str] | None = None) -> str:
+def transcribe_audio(audio_file_path: str, jk_names: list = None) -> str:
+    print(f"Транскрибирую аудио: {audio_file_path}")
+
     compressed_path = None
     send_path = audio_file_path
 
-    if os.path.getsize(audio_file_path) > OPENAI_SIZE_LIMIT:
+    if os.path.getsize(audio_file_path) > GROQ_SIZE_LIMIT:
+        print("Файл большой — сжимаю в MP3...")
         compressed_path = _compress_to_mp3(audio_file_path)
         send_path = compressed_path
+        print(f"Сжато: {os.path.getsize(compressed_path) / 1024 / 1024:.1f} МБ")
 
     try:
-        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        client = Groq(api_key=os.getenv("GROQ_API_KEY"))
         with open(send_path, "rb") as f:
             result = client.audio.transcriptions.create(
-                file=f,
-                model="gpt-4o-mini-transcribe",
+                file=(os.path.basename(send_path), f),
+                model="whisper-large-v3-turbo",
                 language="ru",
                 prompt=_build_transcription_prompt(jk_names or []),
             )
@@ -68,283 +65,212 @@ def transcribe_audio(audio_file_path: str, jk_names: list[str] | None = None) ->
         if compressed_path:
             os.unlink(compressed_path)
 
-    return result.text.strip()
-
-
-def _chunk_transcript(transcript: str, max_chars: int = MAX_TRANSCRIPT_CHARS) -> list[str]:
-    if len(transcript) <= max_chars:
-        return [transcript]
-
-    separators = re_split_candidates(transcript)
-    if not separators:
-        separators = [transcript[i : i + max_chars] for i in range(0, len(transcript), max_chars)]
-
-    chunks = []
-    current = ""
-    for piece in separators:
-        piece = piece.strip()
-        if not piece:
-            continue
-        candidate = f"{current}\n{piece}".strip() if current else piece
-        if len(candidate) <= max_chars:
-            current = candidate
-            continue
-        if current:
-            chunks.append(current)
-        current = piece
-        while len(current) > max_chars:
-            chunks.append(current[:max_chars])
-            current = current[max_chars - CHUNK_OVERLAP_CHARS :]
-    if current:
-        chunks.append(current)
-
-    return _apply_overlap(chunks, max_chars=max_chars, overlap_chars=CHUNK_OVERLAP_CHARS)
-
-
-def re_split_candidates(transcript: str) -> list[str]:
-    lines = [line.strip() for line in transcript.splitlines() if line.strip()]
-    if len(lines) > 3:
-        return lines
-
-    pieces = []
-    buf = ""
-    for part in transcript.replace("! ", "!\n").replace("? ", "?\n").replace(". ", ".\n").splitlines():
-        part = part.strip()
-        if not part:
-            continue
-        pieces.append(part)
-    return pieces
-
-
-def _apply_overlap(chunks: list[str], max_chars: int, overlap_chars: int) -> list[str]:
-    if len(chunks) <= 1:
-        return chunks
-
-    merged = []
-    for idx, chunk in enumerate(chunks):
-        if idx == 0:
-            merged.append(chunk)
-            continue
-        prev_tail = chunks[idx - 1][-overlap_chars:]
-        candidate = prev_tail + "\n" + chunk
-        merged.append(candidate[-max_chars:])
-    return merged
-
-
-def _extraction_schema_text() -> str:
-    schema = ExtractedCallFacts.model_json_schema()
-    return json.dumps(schema, ensure_ascii=False, indent=2)
-
-
-def _extract_json_block(text: str) -> str:
-    if "```json" in text:
-        return text.split("```json", 1)[1].split("```", 1)[0]
-    if "```" in text:
-        return text.split("```", 1)[1].split("```", 1)[0]
+    text = result.text.strip()
+    print(f"Транскрипция готова! Длина текста: {len(text)} символов")
     return text
 
 
-def _build_extraction_prompt(transcript: str, call_id: str, manager_name: str, jk_names: list[str]) -> str:
-    jk_hint = ""
-    if jk_names:
-        jk_hint = (
-            "Список допустимых ЖК для сверки: "
-            + ", ".join(jk_names)
-            + ". Если название в речи искажено, верни сырой вариант как услышал/понял."
-        )
+def _build_stages_text() -> str:
+    stages_text = ""
+    for i, stage in enumerate(SALES_STAGES, 1):
+        stages_text += f"\n{i}. {stage['name']}:\n"
+        for criterion in stage["criteria"]:
+            stages_text += f"   - {criterion}\n"
+    return stages_text
 
-    return (
-        "Извлеки факты из транскрипта звонка менеджера по продажам недвижимости. "
-        "Не оценивай менеджера свободным текстом и не придумывай рекомендации. "
-        "Твоя задача — вернуть только подтверждаемые признаки разговора.\n\n"
-        f"ID звонка: {call_id}\n"
-        f"Имя менеджера по умолчанию: {manager_name}\n"
-        f"{jk_hint}\n\n"
-        "Правила извлечения:\n"
-        "- true ставь только если признак явно подтверждён в тексте\n"
-        "- false ставь только если по смыслу видно, что признак не был выполнен\n"
-        "- null ставь, если из транскрипта нельзя надёжно сделать вывод\n"
-        "- в evidence приводи короткие точные цитаты\n"
-        "- если имя клиента менеджеру уже известно и он обращается по имени, это считается корректным использованием имени\n"
-        "- способ оплаты включает ипотеку, рассрочку и наличные\n"
-        "- callback_later_requested=true только когда клиент просит вернуться к разговору позже\n"
-        "- interrupted_not_manager_fault=true только при явном обрыве/невозможности говорить не по вине менеджера\n"
-        "- non_target_request=true, если звонок не про покупку недвижимости ИЛИ если это некорректный перевод / явный product mismatch: запрос клиента не соответствует продукту застройщика и разговор не может перейти в нормальную продажную работу\n"
-        "- existing_appointment_context=true, если клиент уже записан на просмотр/встречу/консультацию ранее и текущий звонок идёт как сопровождение этой записи\n"
-        "- service_follow_up_question=true, если звонок про уточняющий сервисный вопрос по уже существующей записи или процессу, а не про новую продажную квалификацию\n"
-        "- meeting_offered=true только при явном предложении синхронного следующего шага\n"
-        "- onsite_meeting_offered и online_meeting_offered разделяй строго\n\n"
-        "- passive_material_send=true, если разговор уходит в сценарий «пришлите информацию / я сам(а) изучу» вместо фиксации синхронного следующего шага\n"
-        "Верни только JSON строго по этой схеме:\n"
-        + _extraction_schema_text()
-        + "\n\nТРАНСКРИПТ:\n"
+
+def analyze_call(transcript: str, manager_name: str = "Менеджер", jk_names: list = None) -> tuple[dict, bool]:
+    """Возвращает (анализ, был_ли_обрезан_транскрипт)."""
+    print("\nАнализирую звонок с помощью Claude...")
+
+    was_truncated = len(transcript) > MAX_TRANSCRIPT_CHARS
+    if was_truncated:
+        transcript = transcript[:MAX_TRANSCRIPT_CHARS] + "\n...[транскрипт обрезан]"
+
+    claude = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+    stages_text = _build_stages_text()
+
+    system_prompt = (
+        "Ты эксперт по продажам недвижимости и тренер менеджеров по продажам.\n\n"
+        "ЭТАПЫ ПРОДАЖИ, которые нужно оценить:\n"
+        + stages_text
+    )
+
+    user_prompt = (
+        f"Проанализируй транскрипт звонка менеджера по имени {manager_name}.\n\n"
+        "ТРАНСКРИПТ ЗВОНКА:\n"
         + transcript
+        + "\n\nВерни анализ строго в формате JSON:\n"
+        "{\n"
+        f'  "manager_name": "{manager_name}",\n'
+        '  "overall_score": число от 0 до 100,\n'
+        '  "call_summary": "краткое описание звонка в 2-3 предложениях",\n'
+        '  "residential_complex": "' + (
+            "название ЖК — строго одно из: " + ", ".join(jk_names) + ". Определи по контексту. Если ни одно не подходит — Не определён"
+            if jk_names else
+            "название ЖК или жилого комплекса из разговора. Если не упомянут — Не определён"
+        ) + '",\n'
+        '  "stages": [\n'
+        '    {\n'
+        '      "stage_name": "название этапа",\n'
+        '      "completed": true или false,\n'
+        '      "score": число от 0 до 10,\n'
+        '      "what_was_done": "что менеджер сделал правильно",\n'
+        '      "what_was_missed": "что не сделал или сделал плохо",\n'
+        '      "quote": "цитата из звонка как пример",\n'
+        '      "recommendation": "конкретный совет как улучшить"\n'
+        '    }\n'
+        '  ],\n'
+        '  "critical_misses": ["список критичных пропусков"],\n'
+        '  "top_strengths": ["список сильных сторон"],\n'
+        '  "priority_improvements": ["топ-3 приоритета для улучшения"],\n'
+        '  "report_flags": {\n'
+        '    "call_interrupted": true если звонок прервался не по вине менеджера (обрыв связи, техническая помеха) до завершения разговора — иначе false,\n'
+        '    "interrupted_comment": "одно предложение — о чём успели поговорить до обрыва, или null если не прерывался",\n'
+        '    "passive_sale": true если менеджер завершил разговор пассивно — не пригласил на встречу или показ — иначе false,\n'
+        '    "passive_sale_comment": "одно предложение — чем завершился разговор вместо приглашения",\n'
+        '    "price_mismatch": true если менеджер предложил объект дороже бюджета клиента более чем на 10% — иначе false,\n'
+        '    "client_budget": "бюджет клиента цифрой и валютой, например 5000000 руб., или null если не назван",\n'
+        '    "offered_price": "цена предложенного объекта цифрой и валютой, или null если не названа",\n'
+        '    "price_diff_percent": число — превышение в процентах если price_mismatch true, иначе null,\n'
+        '    "price_mismatch_comment": "одно предложение — что искал клиент и что предложил менеджер",\n'
+        '    "long_term_buyer": true если клиент планирует покупку через 6 и более месяцев — иначе false,\n'
+        '    "long_term_comment": "одно предложение — что клиент сказал о сроках",\n'
+        '    "non_target": true если звонок нецелевой (не покупка: документы, приёмка, другой вопрос) — иначе false,\n'
+        '    "non_target_comment": "одно предложение — с каким вопросом позвонил клиент",\n'
+        '    "meeting_required_not_done": true если встреча была уместна но менеджер не предложил — иначе false,\n'
+        '    "meeting_comment": "одно предложение — почему встреча была уместна и что произошло вместо",\n'
+        '    "meeting_proposed": true если менеджер предложил встречу или показ — иначе false,\n'
+        '    "meeting_agreed": true если клиент согласился на встречу или показ — иначе false,\n'
+        '    "meeting_result_comment": "одно предложение — чем завершилось обсуждение встречи: договорились, клиент отказался, перенесли и т.д."\n'
+        '  }\n'
+        '}\n\n'
+        "Отвечай строго в JSON формате, без дополнительного текста. "
+        "Все поля на русском языке. "
+        "Будь конкретным — приводи примеры из разговора. "
+        "Для report_flags будь строгим: ставь true только при явных признаках в тексте. "
+        "Если call_interrupted=true — не снижай overall_score за незавершённые этапы, оцени только то что успело произойти. "
+        "В транскрипте могут быть ошибки распознавания речи — исправляй их по контексту: "
+        "неправильные названия ЖК, бессмысленные слова, искажённые цифры. "
+        + (
+            "Названия ЖК — только из списка: " + ", ".join(jk_names) + ". Любые искажения исправляй по контексту. "
+            if jk_names else ""
+        )
+        + "В цитатах используй исправленный вариант."
     )
 
-
-def _merge_signal(signals: list[CriterionSignal]) -> CriterionSignal:
-    evidences = []
-    seen_quotes = set()
-    values = [signal.value for signal in signals if signal is not None]
-    notes = [signal.note for signal in signals if signal and signal.note]
-    for signal in signals:
-        if not signal:
-            continue
-        for ev in signal.evidence:
-            key = (ev.text, ev.speaker, ev.timestamp)
-            if key in seen_quotes:
-                continue
-            seen_quotes.add(key)
-            evidences.append(ev)
-
-    if any(value is True for value in values):
-        final_value = True
-    elif any(value is False for value in values):
-        final_value = False
-    else:
-        final_value = None
-
-    return CriterionSignal(
-        value=final_value,
-        evidence=evidences[:5],
-        note="; ".join(dict.fromkeys(notes)) if notes else None,
-    )
-
-
-def _pick_longest(values: list[str | None]) -> str | None:
-    cleaned = [value.strip() for value in values if value and value.strip()]
-    if not cleaned:
-        return None
-    return max(cleaned, key=len)
-
-
-def merge_extracted_facts(chunks: list[ExtractedCallFacts]) -> ExtractedCallFacts:
-    if len(chunks) == 1:
-        return chunks[0]
-
-    base = chunks[0].model_dump()
-    merged = ExtractedCallFacts.model_validate(base)
-
-    signal_fields = [
-        name
-        for name, field in ExtractedCallFacts.model_fields.items()
-        if field.annotation is CriterionSignal
-    ]
-    scalar_text_fields = [
-        "call_summary",
-        "residential_complex_raw",
-        "client_budget",
-        "offered_price",
-        "callback_comment",
-        "interruption_comment",
-        "non_target_comment",
-        "price_comment",
-        "long_term_comment",
-        "meeting_comment",
-    ]
-
-    for field_name in signal_fields:
-        merged_signal = _merge_signal([getattr(chunk, field_name) for chunk in chunks])
-        setattr(merged, field_name, merged_signal)
-
-    for field_name in scalar_text_fields:
-        setattr(merged, field_name, _pick_longest([getattr(chunk, field_name) for chunk in chunks]))
-
-    return merged
-
-
-def _extract_call_facts_for_chunk(
-    prepared_transcript: str,
-    call_id: str,
-    manager_name: str,
-    jk_names: list[str] | None,
-) -> ExtractedCallFacts:
-    client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
-    response = client.messages.create(
+    response = claude.messages.create(
         model=CLAUDE_MODEL,
         max_tokens=8000,
         temperature=0,
-        messages=[
-            {
-                "role": "user",
-                "content": _build_extraction_prompt(
-                    prepared_transcript,
-                    call_id=call_id,
-                    manager_name=manager_name,
-                    jk_names=jk_names or [],
-                ),
-            }
-        ],
+        system=[{
+            "type": "text",
+            "text": system_prompt,
+            "cache_control": {"type": "ephemeral"}
+        }],
+        messages=[{"role": "user", "content": user_prompt}]
     )
 
-    text = _extract_json_block(response.content[0].text).strip()
+    text = response.content[0].text
+    if "```json" in text:
+        text = text.split("```json")[1].split("```")[0]
+    elif "```" in text:
+        text = text.split("```")[1].split("```")[0]
+
     try:
-        parsed = json.loads(text)
+        analysis = json.loads(text.strip())
     except json.JSONDecodeError as e:
-        raise ValueError(f"Claude вернул некорректный JSON при извлечении фактов: {e}\n{text[:400]}")
-
-    return ExtractedCallFacts.model_validate(parsed)
-
-
-def extract_call_facts(
-    transcript: str,
-    call_id: str,
-    manager_name: str = "Менеджер",
-    jk_names: list[str] | None = None,
-) -> tuple[ExtractedCallFacts, int]:
-    chunks = _chunk_transcript(transcript)
-    extracted = [
-        _extract_call_facts_for_chunk(
-            chunk,
-            call_id=call_id,
-            manager_name=manager_name,
-            jk_names=jk_names,
+        raise ValueError(
+            f"Claude вернул некорректный JSON: {e}\n\nНачало ответа:\n{text[:300]}"
         )
-        for chunk in chunks
-    ]
-    return merge_extracted_facts(extracted), len(chunks)
+
+    print("Анализ получен!")
+    return analysis, was_truncated
 
 
-def analyze_call(
-    transcript: str,
-    call_id: str,
-    manager_name: str = "Менеджер",
-    jk_names: list[str] | None = None,
-    policy: ClientPolicy | None = None,
-    client_id: str = DEFAULT_CLIENT_ID,
-) -> tuple[dict, int, dict]:
-    facts, n_chunks = extract_call_facts(
-        transcript,
-        call_id=call_id,
-        manager_name=manager_name,
-        jk_names=jk_names,
-    )
-    catalog = HousingComplexCatalog.from_names(
-        jk_names or [],
-        aliases=load_reference_jk_aliases(client_id=client_id),
-    )
-    complex_match = catalog.normalize(facts.residential_complex_raw)
-    report = score_call(facts, complex_match, policy=policy or DEFAULT_POLICY).model_copy(update={"n_chunks": n_chunks})
-    return report.model_dump(mode="json"), n_chunks, facts.model_dump(mode="json")
+def print_report(analysis: dict):
+    print("\n" + "=" * 60)
+    print(f"АНАЛИЗ ЗВОНКА: {analysis['manager_name']}")
+    print("=" * 60)
+
+    score = analysis["overall_score"]
+    level = "ХОРОШО" if score >= 80 else "СРЕДНЕ" if score >= 60 else "НУЖНА РАБОТА"
+
+    print(f"\nОБЩАЯ ОЦЕНКА: {score}/100 [{level}]")
+    print(f"\nРезюме:\n   {analysis['call_summary']}")
+
+    print("\n" + "-" * 60)
+    print("ОЦЕНКА ПО ЭТАПАМ:")
+    print("-" * 60)
+
+    for stage in analysis["stages"]:
+        status = "[+]" if stage["completed"] else "[-]"
+        print(f"\n{status} {stage['stage_name']} — {stage['score']}/10")
+        if stage.get("what_was_done"):
+            print(f"   Хорошо: {stage['what_was_done']}")
+        if stage.get("what_was_missed"):
+            print(f"   Пропущено: {stage['what_was_missed']}")
+        if stage.get("quote"):
+            print(f"   Цитата: \"{stage['quote']}\"")
+        if stage.get("recommendation"):
+            print(f"   Совет: {stage['recommendation']}")
+
+    print("\n" + "-" * 60)
+    print("КРИТИЧНЫЕ ПРОПУСКИ:")
+    for miss in analysis.get("critical_misses", []):
+        print(f"   * {miss}")
+
+    print("\nСИЛЬНЫЕ СТОРОНЫ:")
+    for strength in analysis.get("top_strengths", []):
+        print(f"   + {strength}")
+
+    print("\nПРИОРИТЕТЫ ДЛЯ УЛУЧШЕНИЯ:")
+    for i, improvement in enumerate(analysis.get("priority_improvements", []), 1):
+        print(f"   {i}. {improvement}")
+
+    print("\n" + "=" * 60)
 
 
-def analyze_call_file(
-    audio_path: str,
-    manager_name: str = "Менеджер",
-    jk_names: list[str] | None = None,
-    client_id: str = DEFAULT_CLIENT_ID,
-):
-    transcript = transcribe_audio(audio_path, jk_names=jk_names)
-    report, n_chunks, facts = analyze_call(
-        transcript,
-        call_id=os.path.basename(audio_path).rsplit(".", 1)[0],
-        manager_name=manager_name,
-        jk_names=jk_names,
-        client_id=client_id,
-    )
-    return {
-        "report": report,
-        "n_chunks": n_chunks,
-        "facts": facts,
-        "transcript": transcript,
-    }
+def save_report(analysis: dict, output_path: str):
+    with open(output_path, "w", encoding="utf-8") as f:
+        json.dump(analysis, f, ensure_ascii=False, indent=2)
+    print(f"\nОтчёт сохранён: {output_path}")
+
+
+def analyze_call_file(audio_path: str, manager_name: str = "Менеджер"):
+    print(f"\n{'=' * 60}")
+    print("ЗАПУСК АНАЛИЗА ЗВОНКА")
+    print(f"   Файл: {audio_path}")
+    print(f"   Менеджер: {manager_name}")
+    print(f"{'=' * 60}")
+
+    transcript = transcribe_audio(audio_path)
+
+    analysis, was_truncated = analyze_call(transcript, manager_name)
+    if was_truncated:
+        print(f"⚠️  Транскрипт длиннее {MAX_TRANSCRIPT_CHARS} символов — анализ по первой части.")
+
+    print_report(analysis)
+
+    output_file = audio_path.rsplit(".", 1)[0] + "_report.json"
+    save_report(analysis, output_file)
+    return analysis
+
+
+if __name__ == "__main__":
+    import sys
+
+    if len(sys.argv) < 2:
+        print("\nУкажите путь к аудиофайлу:")
+        print("   python3 analyzer.py /путь/к/звонку.mp3")
+        print("   python3 analyzer.py /путь/к/звонку.mp3 'Имя Менеджера'")
+        sys.exit(1)
+
+    audio_file = sys.argv[1]
+    manager = sys.argv[2] if len(sys.argv) > 2 else "Менеджер"
+
+    if not os.path.exists(audio_file):
+        print(f"\nФайл не найден: {audio_file}")
+        sys.exit(1)
+
+    analyze_call_file(audio_file, manager)

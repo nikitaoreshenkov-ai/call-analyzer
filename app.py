@@ -4,10 +4,6 @@ import json
 import tempfile
 from dotenv import load_dotenv
 
-from client_paths import DEFAULT_CLIENT_ID, list_available_client_ids, normalize_client_id
-from client_setup import ensure_client_template
-from constants import REVIEW_LABEL, call_status_label
-
 load_dotenv()
 
 st.set_page_config(
@@ -20,13 +16,11 @@ if not os.getenv("ANTHROPIC_API_KEY"):
     st.error("Не задан ANTHROPIC_API_KEY. Добавьте его в файл .env и перезапустите приложение.")
     st.stop()
 
-if not os.getenv("OPENAI_API_KEY"):
-    st.error("Не задан OPENAI_API_KEY. Добавьте его в файл .env и перезапустите приложение.")
+if not os.getenv("GROQ_API_KEY"):
+    st.error("Не задан GROQ_API_KEY. Добавьте его в файл .env и перезапустите приложение.")
     st.stop()
 
-from analyzer import analyze_call
-from jk_catalog import load_reference_jk_names, merge_jk_names
-from policy_config import load_client_policy, meeting_types_label
+from analyzer import analyze_call, MAX_TRANSCRIPT_CHARS
 from storage import save_result, already_processed
 
 
@@ -34,25 +28,15 @@ def _phone_from_filename(name: str) -> str:
     return name.rsplit(".", 1)[0]
 
 
-def render_report(data: dict):
-    if not data.get("score_applicable", data.get("in_funnel", True)):
-        call_status = data.get("call_status", "out_of_funnel")
-        st.info(
-            "Этот звонок исключён из основной воронки: "
-            f"`{call_status_label(call_status)}`"
-        )
-        if data.get("review_required"):
-            st.warning(REVIEW_LABEL + ": " + " | ".join(data.get("review_reasons", [])))
-        st.markdown("**Резюме звонка:**")
-        st.info(data["call_summary"])
-        return
-
+def render_report(data: dict, was_truncated: bool = False):
     score = data["overall_score"]
     label = "ХОРОШО" if score >= 80 else "СРЕДНЕ" if score >= 60 else "НУЖНА РАБОТА"
-    n_chunks = data.get("n_chunks", 1)
 
-    if n_chunks > 1:
-        st.info(f"ℹ️ Длинный звонок: анализ собран из {n_chunks} частей транскрипта.")
+    if was_truncated:
+        st.warning(
+            f"⚠️ Транскрипт длиннее {MAX_TRANSCRIPT_CHARS} символов — "
+            "анализ выполнен по первой части звонка."
+        )
 
     col1, col2, col3 = st.columns([1, 1, 1])
     with col2:
@@ -60,27 +44,6 @@ def render_report(data: dict):
 
     st.markdown("**Резюме звонка:**")
     st.info(data["call_summary"])
-
-    flags = data.get("report_flags", {})
-    if flags.get("meeting_agreed"):
-        if flags.get("meeting_operationally_confirmed"):
-            st.success("Встреча согласована по разговору и операционно подтверждена.")
-        else:
-            st.warning("Встреча согласована по разговору, но операционное подтверждение требует проверки.")
-        if flags.get("meeting_confirmation_comment"):
-            st.caption(flags["meeting_confirmation_comment"])
-    elif flags.get("client_not_ready"):
-        st.info("Клиент пока не готов к встрече в этом разговоре — это отдельный follow-up сценарий. Он не считается прямой потерей встречи сейчас, но требует дальнейшей работы менеджера.")
-        if flags.get("client_not_ready_comment"):
-            st.caption(flags["client_not_ready_comment"])
-    elif flags.get("meeting_proposed") and not flags.get("meeting_agreed"):
-        st.warning("Встреча предложена, но не согласована.")
-        if flags.get("meeting_comment"):
-            st.caption(flags["meeting_comment"])
-    elif flags.get("meeting_required_not_done"):
-        st.error("Встреча была уместна, но менеджер её не предложил.")
-        if flags.get("meeting_comment"):
-            st.caption(flags["meeting_comment"])
 
     st.markdown("---")
     st.subheader("Оценка по этапам")
@@ -131,71 +94,17 @@ AUDIO_EXTENSIONS = {".mp3", ".m4a", ".wav", ".ogg", ".mp4"}
 st.title("Анализ звонков")
 st.divider()
 
-# ── Клиентский контур ────────────────────────────────────────────────────────
-known_client_ids = list_available_client_ids()
-default_client_id = st.session_state.get("client_id", DEFAULT_CLIENT_ID)
-
-with st.expander("🏢 Клиент", expanded=True):
-    st.caption(
-        "Укажите ID клиента. Простыми словами: это отдельная папка хранения, "
-        "чтобы звонки разных застройщиков не смешивались между собой."
-    )
-    if known_client_ids:
-        st.caption("Уже известные ID: " + ", ".join(known_client_ids))
-    raw_client_id = st.text_input(
-        "ID клиента",
-        value=default_client_id,
-        placeholder="default",
-        help="Например: default, a101, client_2",
-    )
-
-client_id = normalize_client_id(raw_client_id)
-st.session_state["client_id"] = client_id
-st.caption(f"Сейчас работаем в контуре клиента: `{client_id}`")
-
-create_template = st.button("Подготовить шаблон клиента", use_container_width=True)
-if create_template:
-    template_info = ensure_client_template(client_id)
-    if template_info["created_files"]:
-        st.success(
-            "Шаблон клиента подготовлен. Созданы файлы: "
-            + ", ".join(template_info["created_files"])
-        )
-    else:
-        st.info("Шаблон клиента уже был подготовлен раньше, новые файлы не создавались.")
-    st.caption(f"Справочники клиента: `{template_info['reference_dir']}`")
-    st.caption(f"Результаты клиента: `{template_info['results_dir']}`")
-    st.caption(f"Артефакты клиента: `{template_info['artifacts_dir']}`")
-
 # ── Список ЖК (общий для обеих вкладок) ──────────────────────────────────────
-reference_jk_names = load_reference_jk_names(client_id=client_id)
-client_policy = load_client_policy(client_id=client_id)
-
 with st.expander("⚙️ Настройки: названия ЖК для этого батча", expanded=False):
-    st.caption(
-        "Политика клиента из файла: "
-        f"валидные встречи — {meeting_types_label(client_policy)}; "
-        f"callback без предметного диалога вне воронки — {'да' if client_policy.callback_later_without_dialog_out_of_funnel else 'нет'}."
-    )
-    if reference_jk_names:
-        st.caption(
-            f"Подключён справочник ЖК: {len(reference_jk_names)} названий. "
-            "Ниже можно добавить дополнительные названия для текущего батча этого клиента."
-        )
-    else:
-        st.caption(
-            "Укажите точные названия жилых комплексов — по одному на строке. "
-            "Claude и Whisper будут использовать их при распознавании."
-        )
+    st.caption("Укажите точные названия жилых комплексов — по одному на строке. Claude и Whisper будут использовать их при распознавании.")
     jk_input = st.text_area(
-        "Дополнительные названия ЖК",
+        "Названия ЖК",
         placeholder="А101 Лаголово\nА101 Всеволожск",
         height=100,
         label_visibility="collapsed",
     )
 
-custom_jk_names = [line.strip() for line in jk_input.splitlines() if line.strip()] if jk_input else []
-jk_names = merge_jk_names(reference_jk_names, custom_jk_names)
+jk_names = [line.strip() for line in jk_input.splitlines() if line.strip()] if jk_input else []
 
 tab_upload, tab_folder = st.tabs(["📁 Загрузить файлы", "🗂 Папка на диске"])
 
@@ -210,41 +119,27 @@ def _process_files(file_entries: list[tuple[str, str]]):
         phone = _phone_from_filename(display_name)
         st.markdown(f"### 📞 {phone}  `({idx + 1}/{total})`")
 
-        if already_processed(phone, client_id=client_id):
+        if already_processed(phone):
             st.info("⏭ Уже обработан — пропускаем.")
             overall_bar.progress((idx + 1) / total, text=f"Обработано {idx + 1} / {total}")
             continue
 
         try:
-            with st.spinner("Транскрибирую через OpenAI..."):
+            with st.spinner("Транскрибирую через Groq..."):
                 from analyzer import transcribe_audio
                 transcript = transcribe_audio(file_path, jk_names=jk_names or None)
 
             with st.spinner("Анализирую через Claude..."):
-                result, n_chunks, extracted_facts = analyze_call(
-                    transcript,
-                    phone,
-                    jk_names=jk_names or None,
-                    policy=client_policy,
-                    client_id=client_id,
-                )
+                result, was_truncated = analyze_call(transcript, phone, jk_names=jk_names or None)
 
-            save_result(
-                phone,
-                display_name,
-                result,
-                n_chunks,
-                transcript=transcript,
-                extracted_facts=extracted_facts,
-                client_id=client_id,
-            )
+            save_result(phone, display_name, result, was_truncated)
 
             score = result["overall_score"]
             label = "🟢 ХОРОШО" if score >= 80 else "🟡 СРЕДНЕ" if score >= 60 else "🔴 НУЖНА РАБОТА"
             st.success(f"Оценка: **{score}/100** — {label}")
 
             with st.expander("Подробный отчёт", expanded=False):
-                render_report(result)
+                render_report(result, was_truncated)
 
         except Exception as e:
             st.error(f"Ошибка при обработке {display_name}: {e}")
@@ -252,10 +147,7 @@ def _process_files(file_entries: list[tuple[str, str]]):
         overall_bar.progress((idx + 1) / total, text=f"Обработано {idx + 1} / {total}")
 
     st.balloons()
-    st.success(
-        f"✅ Готово! Обработано {total} звонков для клиента `{client_id}`. "
-        "Перейдите на страницу **История** для сводной таблицы."
-    )
+    st.success(f"✅ Готово! Обработано {total} звонков. Перейдите на страницу **История** для сводной таблицы.")
 
 
 # ── Вкладка 1: загрузка через браузер ────────────────────────────────────────
